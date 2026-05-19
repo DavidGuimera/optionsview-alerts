@@ -2,7 +2,6 @@ import os
 import time
 import json
 import requests
-from math import erf, log, sqrt
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -10,31 +9,23 @@ import pandas as pd
 import yfinance as yf
 
 
-# =====================================================
-# CONFIG
-# =====================================================
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MIN_SETUP_SCORE = int(os.getenv("MIN_SETUP_SCORE", "65"))
+MIN_SETUP_SCORE = int(os.getenv("MIN_SETUP_SCORE", "60"))
 MAX_TICKERS = int(os.getenv("MAX_TICKERS", "230"))
 
 DEFAULT_PERIOD = "1y"
-DEFAULT_PUT_RSI = 32
-DEFAULT_CALL_RSI = 68
-DEFAULT_DISTANCE_SUPPORT = 3.0
-DEFAULT_DISTANCE_RESISTANCE = 4.0
+DEFAULT_PUT_RSI = 35
+DEFAULT_CALL_RSI = 65
+DEFAULT_DISTANCE_SUPPORT = 4.0
+DEFAULT_DISTANCE_RESISTANCE = 5.0
 SUPPORT_RESISTANCE_WINDOW = 60
 DEFAULT_SPREAD_WIDTH = 5
 
 ALERT_MEMORY_FILE = "alert_memory.json"
 ALERT_COOLDOWN_HOURS = 24
 
-
-# =====================================================
-# TELEGRAM
-# =====================================================
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -52,10 +43,6 @@ def send_telegram(message):
         print("Error Telegram:", e)
         return False
 
-
-# =====================================================
-# ANTI-DUPLICADOS 24H
-# =====================================================
 
 def load_alert_memory():
     if not os.path.exists(ALERT_MEMORY_FILE):
@@ -85,10 +72,6 @@ def recently_alerted(ticker, memory):
         return False
 
 
-# =====================================================
-# SP500 + NASDAQ100
-# =====================================================
-
 def get_sp500_tickers():
     fallback = [
         "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","BRK-B","LLY","AVGO",
@@ -104,8 +87,7 @@ def get_sp500_tickers():
         df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
         tickers = df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
         return tickers if tickers else fallback
-    except Exception as e:
-        print("Fallback SP500:", e)
+    except Exception:
         return fallback
 
 
@@ -128,8 +110,7 @@ def get_nasdaq100_tickers():
                     if len(tickers) > 20:
                         return tickers
         return fallback
-    except Exception as e:
-        print("Fallback NASDAQ100:", e)
+    except Exception:
         return fallback
 
 
@@ -146,10 +127,6 @@ def get_universe():
 
     return clean[:MAX_TICKERS]
 
-
-# =====================================================
-# INDICADORES APP
-# =====================================================
 
 def safe_float(value):
     try:
@@ -175,10 +152,8 @@ def calculate_rsi(series, period=14):
 def calculate_stochastic(data, k_period=14, d_period=3):
     low_min = data["Low"].rolling(window=k_period).min()
     high_max = data["High"].rolling(window=k_period).max()
-
     k = 100 * ((data["Close"] - low_min) / (high_max - low_min))
     d = k.rolling(window=d_period).mean()
-
     return k, d
 
 
@@ -220,7 +195,6 @@ def prepare_data(ticker, period="1y"):
 
     data["RSI"] = calculate_rsi(data["Close"])
     data["STO_K"], data["STO_D"] = calculate_stochastic(data)
-
     data["EMA21"] = data["Close"].ewm(span=21, adjust=False).mean()
     data["SMA20"] = data["Close"].rolling(20).mean()
     data["SMA50"] = data["Close"].rolling(50).mean()
@@ -254,7 +228,6 @@ def calculate_iv_rank_proxy(data):
             return round(current_hv, 1), np.nan
 
         iv_rank = ((current_hv - hv_min) / (hv_max - hv_min)) * 100
-
         return round(current_hv, 1), round(max(0, min(100, iv_rank)), 1)
 
     except Exception:
@@ -271,13 +244,10 @@ def classify_trend(price, sma20, sma50, sma200):
 
     if price > sma20 > sma50 > sma200:
         return "Alcista fuerte"
-
     if price > sma50 and price > sma200:
         return "Alcista"
-
     if price < sma20 < sma50 < sma200:
         return "Bajista fuerte"
-
     if price < sma50 and price < sma200:
         return "Bajista"
 
@@ -303,7 +273,6 @@ def detect_trend(data):
 
         if price > ema21 > sma50:
             return "Alcista"
-
         if price < ema21 < sma50:
             return "Bajista"
 
@@ -334,13 +303,8 @@ def round_to_option_strike(price):
 def format_strike(value):
     if pd.isna(value):
         return ""
-
     return str(int(value)) if float(value).is_integer() else str(value)
 
-
-# =====================================================
-# SCORE IGUAL QUE LA APP
-# =====================================================
 
 def calculate_setup_quality(
     signal,
@@ -471,20 +435,16 @@ def advanced_risk_filter(signal, price, sma20, sma50, sma200, rsi, sto_k):
     if signal == "PUT / Bull Put Spread":
         if not pd.isna(sma200) and price < sma200:
             reasons.append("Precio bajo SMA200")
-
         if not pd.isna(sma20) and not pd.isna(sma50) and sma20 < sma50:
             reasons.append("SMA20 bajo SMA50")
-
         if not pd.isna(sma20) and not pd.isna(sma50) and not pd.isna(sma200) and sma20 < sma50 < sma200:
             reasons.append("Tendencia bajista fuerte")
-
         if rsi < 25:
             reasons.append("RSI extremadamente bajo")
 
     if signal == "CALL Spread":
         if not pd.isna(sma20) and not pd.isna(sma50) and not pd.isna(sma200) and price > sma20 > sma50 > sma200:
             reasons.append("Tendencia alcista fuerte")
-
         if rsi > 78:
             reasons.append("RSI extremadamente alto")
 
@@ -516,10 +476,6 @@ def position_recommendation(quality, risk):
 
     return contracts, label
 
-
-# =====================================================
-# ANALYZE TICKER
-# =====================================================
 
 def analyze_ticker(ticker):
     data = prepare_data(ticker, DEFAULT_PERIOD)
@@ -630,10 +586,6 @@ def analyze_ticker(ticker):
     }
 
 
-# =====================================================
-# MENSAJE TELEGRAM
-# =====================================================
-
 def alert_message(row):
     score = safe_float(row.get("Calidad setup %", 0))
 
@@ -662,10 +614,6 @@ def alert_message(row):
         f"Revisar earnings y cadena real antes de entrar."
     )
 
-
-# =====================================================
-# SCAN
-# =====================================================
 
 def scan_once():
     tickers = get_universe()
@@ -701,10 +649,6 @@ def scan_once():
     print(f"Escaneo terminado. Setups nuevos: {len(setups)}")
     return setups
 
-
-# =====================================================
-# MAIN GITHUB ACTIONS
-# =====================================================
 
 if __name__ == "__main__":
     setups = scan_once()
