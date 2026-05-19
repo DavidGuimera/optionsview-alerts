@@ -9,6 +9,10 @@ import pandas as pd
 import yfinance as yf
 
 
+# =====================================================
+# CONFIG - MISMA LÓGICA QUE LA APP LOCAL
+# =====================================================
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -27,6 +31,10 @@ ALERT_MEMORY_FILE = "alert_memory.json"
 ALERT_COOLDOWN_HOURS = 24
 
 
+# =====================================================
+# TELEGRAM
+# =====================================================
+
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
@@ -43,6 +51,10 @@ def send_telegram(message):
         print("Error Telegram:", e)
         return False
 
+
+# =====================================================
+# ANTI-DUPLICADOS 24H
+# =====================================================
 
 def load_alert_memory():
     if not os.path.exists(ALERT_MEMORY_FILE):
@@ -72,6 +84,10 @@ def recently_alerted(ticker, memory):
         return False
 
 
+# =====================================================
+# SP500 + NASDAQ100
+# =====================================================
+
 def get_sp500_tickers():
     fallback = [
         "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","BRK-B","LLY","AVGO",
@@ -87,7 +103,8 @@ def get_sp500_tickers():
         df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
         tickers = df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
         return tickers if tickers else fallback
-    except Exception:
+    except Exception as e:
+        print("Fallback SP500:", e)
         return fallback
 
 
@@ -110,7 +127,8 @@ def get_nasdaq100_tickers():
                     if len(tickers) > 20:
                         return tickers
         return fallback
-    except Exception:
+    except Exception as e:
+        print("Fallback NASDAQ100:", e)
         return fallback
 
 
@@ -127,6 +145,10 @@ def get_universe():
 
     return clean[:MAX_TICKERS]
 
+
+# =====================================================
+# INDICADORES
+# =====================================================
 
 def safe_float(value):
     try:
@@ -195,6 +217,7 @@ def prepare_data(ticker, period="1y"):
 
     data["RSI"] = calculate_rsi(data["Close"])
     data["STO_K"], data["STO_D"] = calculate_stochastic(data)
+
     data["EMA21"] = data["Close"].ewm(span=21, adjust=False).mean()
     data["SMA20"] = data["Close"].rolling(20).mean()
     data["SMA50"] = data["Close"].rolling(50).mean()
@@ -244,10 +267,13 @@ def classify_trend(price, sma20, sma50, sma200):
 
     if price > sma20 > sma50 > sma200:
         return "Alcista fuerte"
+
     if price > sma50 and price > sma200:
         return "Alcista"
+
     if price < sma20 < sma50 < sma200:
         return "Bajista fuerte"
+
     if price < sma50 and price < sma200:
         return "Bajista"
 
@@ -273,6 +299,7 @@ def detect_trend(data):
 
         if price > ema21 > sma50:
             return "Alcista"
+
         if price < ema21 < sma50:
             return "Bajista"
 
@@ -303,24 +330,15 @@ def round_to_option_strike(price):
 def format_strike(value):
     if pd.isna(value):
         return ""
+
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def calculate_setup_quality(
-    signal,
-    rsi,
-    sto_k,
-    dist_support,
-    dist_resistance,
-    trend,
-    price,
-    sma20,
-    sma50,
-    sma200,
-    iv_rank=np.nan,
-    trend_4h="Neutral",
-    trend_1h="Neutral"
-):
+# =====================================================
+# SCORE - MISMO CÁLCULO QUE LA APP MODIFICADA
+# =====================================================
+
+def calculate_setup_quality(signal, rsi, sto_k, dist_support, dist_resistance, trend, price, sma20, sma50, sma200, iv_rank=np.nan, trend_4h="Neutral", trend_1h="Neutral"):
     if signal in ["NO TRADE", "ERROR"]:
         return 0
 
@@ -331,17 +349,17 @@ def calculate_setup_quality(
 
     if signal == "PUT / Bull Put Spread":
         if not pd.isna(sma200):
-            score += 18 if price > sma200 else -22
+            score += 18 if price > sma200 else -18
 
         if bullish_trend:
             score += 12
         elif bearish_trend:
-            score -= 15
+            score -= 12
 
         if trend_4h == "Alcista":
-            score += 10
+            score += 9
         elif trend_4h == "Bajista":
-            score -= 10
+            score -= 8
 
         if trend_1h == "Alcista":
             score += 4
@@ -351,33 +369,39 @@ def calculate_setup_quality(
         if dist_support <= 1.5:
             score += 16
         elif dist_support <= 3:
-            score += 10
+            score += 12
+        elif dist_support <= 4:
+            score += 8
         elif dist_support > 8:
             score -= 10
 
         if rsi <= 30:
-            score += 6
+            score += 8
+        elif rsi <= 35:
+            score += 5
         elif rsi >= 55:
             score -= 6
 
         if sto_k <= 20:
             score += 3
+        elif sto_k <= 35:
+            score += 1
         elif sto_k >= 80:
             score -= 3
 
     elif signal == "CALL Spread":
         if not pd.isna(sma200):
-            score += 18 if price < sma200 else -12
+            score += 18 if price < sma200 else -10
 
         if bearish_trend:
             score += 12
         elif bullish_trend:
-            score -= 12
+            score -= 10
 
         if trend_4h == "Bajista":
-            score += 10
+            score += 9
         elif trend_4h == "Alcista":
-            score -= 10
+            score -= 8
 
         if trend_1h == "Bajista":
             score += 4
@@ -387,17 +411,23 @@ def calculate_setup_quality(
         if dist_resistance <= 1.5:
             score += 16
         elif dist_resistance <= 4:
-            score += 10
-        elif dist_resistance > 8:
+            score += 12
+        elif dist_resistance <= 5:
+            score += 8
+        elif dist_resistance > 9:
             score -= 10
 
         if rsi >= 70:
-            score += 6
+            score += 8
+        elif rsi >= 65:
+            score += 5
         elif rsi <= 45:
             score -= 6
 
         if sto_k >= 80:
             score += 3
+        elif sto_k >= 65:
+            score += 1
         elif sto_k <= 20:
             score -= 3
 
@@ -408,8 +438,10 @@ def calculate_setup_quality(
             score += 15
         elif iv_rank >= 40:
             score += 8
+        elif iv_rank >= 25:
+            score += 3
         elif iv_rank < 20:
-            score -= 15
+            score -= 12
 
     return int(max(0, min(100, round(score))))
 
@@ -417,15 +449,47 @@ def calculate_setup_quality(
 def quality_label(score):
     if score >= 85:
         return "Excepcional"
-    if score >= 70:
+    if score >= 75:
         return "Muy bueno"
-    if score >= 50:
+    if score >= 60:
         return "Bueno"
-    if score >= 35:
+    if score >= 50:
         return "Aceptable"
     if score > 0:
         return "Flojo"
     return "Sin setup"
+
+
+def position_recommendation(quality, risk):
+    try:
+        quality = float(quality)
+    except Exception:
+        quality = 0
+
+    contracts = 0
+    label = "Sin entrada"
+
+    if 50 <= quality < 65:
+        contracts = 1
+        label = "Entrada moderada"
+    elif 65 <= quality < 75:
+        contracts = 1
+        label = "Buen setup"
+    elif 75 <= quality < 85:
+        contracts = 2
+        label = "Entrada fuerte"
+    elif quality >= 85:
+        contracts = 2
+        label = "Setup excepcional"
+
+    if risk == "Alto":
+        contracts = max(0, contracts - 1)
+        if contracts == 0:
+            label = "Evitar / revisar"
+        else:
+            label = f"Riesgo alto: reducir a {contracts} contrato"
+
+    return contracts, label
 
 
 def advanced_risk_filter(signal, price, sma20, sma50, sma200, rsi, sto_k):
@@ -456,26 +520,9 @@ def advanced_risk_filter(signal, price, sma20, sma50, sma200, rsi, sto_k):
     return risk_level, reasons
 
 
-def position_recommendation(quality, risk):
-    contracts = 0
-    label = "Sin entrada"
-
-    if 50 <= quality < 70:
-        contracts = 1
-        label = "Entrada moderada"
-    elif 70 <= quality < 85:
-        contracts = 2
-        label = "Entrada fuerte"
-    elif quality >= 85:
-        contracts = 2
-        label = "Setup excepcional"
-
-    if risk == "Alto":
-        contracts = max(0, contracts - 1)
-        label = "Riesgo alto: reducir/revisar"
-
-    return contracts, label
-
+# =====================================================
+# ANÁLISIS
+# =====================================================
 
 def analyze_ticker(ticker):
     data = prepare_data(ticker, DEFAULT_PERIOD)
@@ -535,7 +582,6 @@ def analyze_ticker(ticker):
     try:
         data_4h = download_data(ticker, "6mo", "4h")
         data_1h = download_data(ticker, "2mo", "1h")
-
         trend_4h = detect_trend(data_4h)
         trend_1h = detect_trend(data_1h)
     except Exception:
@@ -586,16 +632,21 @@ def analyze_ticker(ticker):
     }
 
 
+# =====================================================
+# MENSAJE TELEGRAM
+# =====================================================
+
 def alert_message(row):
     score = safe_float(row.get("Calidad setup %", 0))
 
-    tipo = (
-        "🔥 SETUP ÉLITE"
-        if score >= 85
-        else "🔴 PREMIUM"
-        if score >= 70
-        else "🟡 WATCHLIST"
-    )
+    if score >= 85:
+        tipo = "🔥 SETUP ÉLITE"
+    elif score >= 75:
+        tipo = "🔴 PREMIUM"
+    elif score >= 65:
+        tipo = "🟡 BUEN SETUP"
+    else:
+        tipo = "🟡 WATCHLIST"
 
     return (
         f"{tipo} OptionsView PRO\n\n"
@@ -615,12 +666,16 @@ def alert_message(row):
     )
 
 
+# =====================================================
+# SCAN
+# =====================================================
+
 def scan_once():
     tickers = get_universe()
     memory = load_alert_memory()
     setups = []
 
-    print(f"Escaneando {len(tickers)} tickers SP500 + NASDAQ100 con parámetros APP...")
+    print(f"Escaneando {len(tickers)} tickers SP500 + NASDAQ100 con lógica igual a la app...")
 
     for i, ticker in enumerate(tickers, 1):
         try:
