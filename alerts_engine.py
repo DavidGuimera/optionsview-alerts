@@ -1,3 +1,16 @@
+"""
+OptionsView PRO - Alerts Engine para GitHub Actions
+Escanea SP500 + NASDAQ100 una vez y termina.
+
+IMPORTANTE:
+Este archivo está preparado para GitHub Actions, NO para dejarlo en while True.
+GitHub lo ejecutará automáticamente cada 15 minutos mediante alerts.yml.
+
+Secrets necesarios en GitHub:
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+"""
+
 import os
 import time
 import requests
@@ -5,267 +18,477 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+# =====================================================
+
+# CONFIGURACIÓN
+
+# =====================================================
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MIN_SETUP_SCORE = 65
-SCAN_INTERVAL_MINUTES = 5
-MAX_TICKERS = 230
+MIN_SETUP_SCORE = float(os.getenv("MIN_SETUP_SCORE", "65"))
+MAX_TICKERS = int(os.getenv("MAX_TICKERS", "230"))
 
 DEFAULT_PUT_RSI = 32
 DEFAULT_CALL_RSI = 68
+SUPPORT_RESISTANCE_WINDOW = 60
+
+# =====================================================
+
+# TELEGRAM
+
+# =====================================================
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
-    try:
-        r = requests.post(url, data=payload, timeout=10)
-        print(r.text)
-        return r.status_code == 200
-    except Exception as e:
-        print("Error Telegram:", e)
-        return False
+if not BOT_TOKEN or not CHAT_ID:
+print("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
+return False
 
-def safe_float(x):
-    try:
-        if pd.isna(x):
-            return np.nan
-        return float(x)
-    except Exception:
-        return np.nan
+```
+url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+payload = {
+    "chat_id": CHAT_ID,
+    "text": message,
+}
+
+try:
+    r = requests.post(url, data=payload, timeout=10)
+    print("Respuesta Telegram:", r.text)
+    return r.status_code == 200
+except Exception as e:
+    print("Error Telegram:", e)
+    return False
+```
+
+# =====================================================
+
+# UNIVERSO SP500 + NASDAQ100
+
+# =====================================================
 
 def get_sp500():
-    try:
-        df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        return df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
-    except Exception:
-        return ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","COST","PEP","PG","MCD","V","MA","KO","HD","LOW","WMT","JNJ","JPM"]
+fallback = [
+"AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "COST", "PEP", "PG",
+"MCD", "V", "MA", "KO", "HD", "LOW", "WMT", "JNJ", "JPM", "XOM",
+"UNH", "LLY", "AVGO", "ABBV", "BAC", "CVX", "MRK", "CRM", "AMD", "TMO",
+"ADBE", "LIN", "WFC", "CSCO", "ABT", "QCOM", "PM", "IBM", "TXN", "CAT",
+]
+try:
+df = pd.read_html("[https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies%22%29[0)]
+return df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
+except Exception as e:
+print("No se pudo cargar SP500 desde Wikipedia. Usando fallback:", e)
+return fallback
 
 def get_nasdaq100():
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        for table in tables:
-            for col in table.columns:
-                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
-                    tickers = table[col].astype(str).str.replace(".", "-", regex=False).tolist()
-                    tickers = [t for t in tickers if t and t.lower() != "nan"]
-                    if len(tickers) > 20:
-                        return tickers
-    except Exception:
-        pass
-    return ["AAPL","MSFT","NVDA","AMZN","META","TSLA","COST","NFLX","PEP","ADBE","AMD","AVGO","QCOM","SBUX"]
+fallback = [
+"AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "COST", "NFLX", "PEP", "ADBE",
+"AMD", "AVGO", "QCOM", "SBUX", "INTU", "AMGN", "HON", "ISRG", "AMAT", "BKNG",
+"CMCSA", "PANW", "ADP", "VRTX", "GILD", "MU", "ADI", "LRCX", "KLAC", "MDLZ",
+]
+try:
+tables = pd.read_html("[https://en.wikipedia.org/wiki/Nasdaq-100](https://en.wikipedia.org/wiki/Nasdaq-100)")
+for table in tables:
+for col in table.columns:
+if "ticker" in str(col).lower() or "symbol" in str(col).lower():
+tickers = table[col].astype(str).str.replace(".", "-", regex=False).tolist()
+tickers = [t for t in tickers if t and t.lower() != "nan"]
+if len(tickers) > 20:
+return tickers
+except Exception as e:
+print("No se pudo cargar NASDAQ100 desde Wikipedia. Usando fallback:", e)
+return fallback
 
 def get_universe():
-    tickers = get_sp500() + get_nasdaq100()
-    clean = []
-    seen = set()
-    for t in tickers:
-        t = t.upper().strip()
-        if t and t not in seen:
-            clean.append(t)
-            seen.add(t)
-    return clean[:MAX_TICKERS]
+tickers = get_sp500() + get_nasdaq100()
+clean = []
+seen = set()
 
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+```
+for t in tickers:
+    t = str(t).upper().strip()
+    if t and t not in seen:
+        clean.append(t)
+        seen.add(t)
 
-def stochastic(data, k_period=14):
-    low_min = data["Low"].rolling(k_period).min()
-    high_max = data["High"].rolling(k_period).max()
-    return 100 * ((data["Close"] - low_min) / (high_max - low_min))
+return clean[:MAX_TICKERS]
+```
 
-def iv_rank_proxy(data):
-    try:
-        returns = data["Close"].pct_change().dropna()
-        hv20 = returns.rolling(20).std() * np.sqrt(252) * 100
-        hv20 = hv20.dropna()
-        if hv20.empty:
-            return np.nan
-        current = safe_float(hv20.iloc[-1])
-        low = safe_float(hv20.min())
-        high = safe_float(hv20.max())
-        if high == low:
-            return np.nan
-        return round(((current - low) / (high - low)) * 100, 1)
-    except Exception:
+# =====================================================
+
+# INDICADORES
+
+# =====================================================
+
+def safe_float(x):
+try:
+if pd.isna(x):
+return np.nan
+return float(x)
+except Exception:
+return np.nan
+
+def calculate_rsi(series, period=14):
+delta = series.diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+rs = avg_gain / avg_loss.replace(0, np.nan)
+return 100 - (100 / (1 + rs))
+
+def calculate_stochastic(data, k_period=14):
+low_min = data["Low"].rolling(k_period).min()
+high_max = data["High"].rolling(k_period).max()
+return 100 * ((data["Close"] - low_min) / (high_max - low_min))
+
+def calculate_iv_rank_proxy(data):
+try:
+returns = data["Close"].pct_change().dropna()
+hv20 = returns.rolling(20).std() * np.sqrt(252) * 100
+hv20 = hv20.dropna()
+
+```
+    if hv20.empty:
         return np.nan
 
-def trend_from_data(data):
-    try:
-        close = data["Close"].dropna()
-        if len(close) < 60:
-            return "Neutral"
-        ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
-        sma50 = close.rolling(50).mean().iloc[-1]
-        price = close.iloc[-1]
-        if price > ema21 > sma50:
-            return "Alcista"
-        if price < ema21 < sma50:
-            return "Bajista"
-        return "Neutral"
-    except Exception:
-        return "Neutral"
+    current = safe_float(hv20.iloc[-1])
+    low = safe_float(hv20.min())
+    high = safe_float(hv20.max())
 
-def download(ticker, period="1y", interval="1d"):
-    try:
-        data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, threads=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        return data.dropna(subset=["Open","High","Low","Close"])
-    except Exception:
+    if high == low:
+        return np.nan
+
+    return round(((current - low) / (high - low)) * 100, 1)
+except Exception:
+    return np.nan
+```
+
+def trend_from_data(data):
+try:
+if data is None or data.empty or len(data) < 60:
+return "Neutral"
+
+```
+    close = data["Close"].dropna()
+    ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
+    sma50 = close.rolling(50).mean().iloc[-1]
+    price = close.iloc[-1]
+
+    if price > ema21 > sma50:
+        return "Alcista"
+    if price < ema21 < sma50:
+        return "Bajista"
+    return "Neutral"
+except Exception:
+    return "Neutral"
+```
+
+def download_data(ticker, period="1y", interval="1d"):
+try:
+data = yf.download(
+ticker,
+period=period,
+interval=interval,
+progress=False,
+auto_adjust=True,
+threads=False,
+)
+
+```
+    if data is None or data.empty:
         return pd.DataFrame()
 
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    return data.dropna(subset=["Open", "High", "Low", "Close"])
+except Exception as e:
+    print(f"Error descargando {ticker}: {e}")
+    return pd.DataFrame()
+```
+
+# =====================================================
+
+# SCORE
+
+# =====================================================
+
 def score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance, sma200, trend_1d, trend_4h, trend_1h, iv_rank):
-    if signal == "NO TRADE":
-        return 0
+if signal == "NO TRADE":
+return 0
 
-    score = 45
+```
+score = 45
 
-    if signal == "PUT / Bull Put Spread":
+# PUT / Bull Put Spread
+if signal == "PUT / Bull Put Spread":
+    if not pd.isna(sma200):
         score += 18 if price > sma200 else -22
-        score += 12 if trend_1d in ["Alcista", "Alcista fuerte"] else -15 if trend_1d in ["Bajista", "Bajista fuerte"] else 0
-        score += 10 if trend_4h == "Alcista" else -10 if trend_4h == "Bajista" else 0
-        score += 4 if trend_1h == "Alcista" else -4 if trend_1h == "Bajista" else 0
-        score += 16 if dist_support <= 1.5 else 10 if dist_support <= 3 else -10 if dist_support > 8 else 0
-        score += 6 if rsi_val <= 30 else -6 if rsi_val >= 55 else 0
-        score += 3 if stoch_val <= 20 else -3 if stoch_val >= 80 else 0
 
-    if signal == "CALL Spread":
+    if trend_1d in ["Alcista", "Alcista fuerte"]:
+        score += 12
+    elif trend_1d in ["Bajista", "Bajista fuerte"]:
+        score -= 15
+
+    if trend_4h == "Alcista":
+        score += 10
+    elif trend_4h == "Bajista":
+        score -= 10
+
+    if trend_1h == "Alcista":
+        score += 4
+    elif trend_1h == "Bajista":
+        score -= 4
+
+    if dist_support <= 1.5:
+        score += 16
+    elif dist_support <= 3:
+        score += 10
+    elif dist_support > 8:
+        score -= 10
+
+    # RSI y estocástico pesan menos para evitar ruido intradía.
+    if rsi_val <= 30:
+        score += 6
+    elif rsi_val >= 55:
+        score -= 6
+
+    if stoch_val <= 20:
+        score += 3
+    elif stoch_val >= 80:
+        score -= 3
+
+# CALL Spread
+elif signal == "CALL Spread":
+    if not pd.isna(sma200):
         score += 18 if price < sma200 else -12
-        score += 12 if trend_1d in ["Bajista", "Bajista fuerte"] else -12 if trend_1d in ["Alcista", "Alcista fuerte"] else 0
-        score += 10 if trend_4h == "Bajista" else -10 if trend_4h == "Alcista" else 0
-        score += 4 if trend_1h == "Bajista" else -4 if trend_1h == "Alcista" else 0
-        score += 16 if dist_resistance <= 1.5 else 10 if dist_resistance <= 4 else -10 if dist_resistance > 8 else 0
-        score += 6 if rsi_val >= 70 else -6 if rsi_val <= 45 else 0
-        score += 3 if stoch_val >= 80 else -3 if stoch_val <= 20 else 0
 
-    if not pd.isna(iv_rank):
-        score += 15 if iv_rank >= 60 else 8 if iv_rank >= 40 else -15 if iv_rank < 20 else 0
+    if trend_1d in ["Bajista", "Bajista fuerte"]:
+        score += 12
+    elif trend_1d in ["Alcista", "Alcista fuerte"]:
+        score -= 12
 
-    return int(max(0, min(100, round(score))))
+    if trend_4h == "Bajista":
+        score += 10
+    elif trend_4h == "Alcista":
+        score -= 10
+
+    if trend_1h == "Bajista":
+        score += 4
+    elif trend_1h == "Alcista":
+        score -= 4
+
+    if dist_resistance <= 1.5:
+        score += 16
+    elif dist_resistance <= 4:
+        score += 10
+    elif dist_resistance > 8:
+        score -= 10
+
+    if rsi_val >= 70:
+        score += 6
+    elif rsi_val <= 45:
+        score -= 6
+
+    if stoch_val >= 80:
+        score += 3
+    elif stoch_val <= 20:
+        score -= 3
+
+# IV Rank para venta de prima.
+if not pd.isna(iv_rank):
+    if iv_rank >= 60:
+        score += 15
+    elif iv_rank >= 40:
+        score += 8
+    elif iv_rank < 20:
+        score -= 15
+
+return int(max(0, min(100, round(score))))
+```
+
+# =====================================================
+
+# ANÁLISIS DE TICKER
+
+# =====================================================
 
 def analyze_ticker(ticker):
-    data = download(ticker, "1y", "1d")
-    if data.empty or len(data) < 200:
-        return None
+data = download_data(ticker, "1y", "1d")
 
-    data["RSI"] = rsi(data["Close"])
-    data["STOCH"] = stochastic(data)
-    data["SMA20"] = data["Close"].rolling(20).mean()
-    data["SMA50"] = data["Close"].rolling(50).mean()
-    data["SMA200"] = data["Close"].rolling(200).mean()
+```
+if data.empty or len(data) < 200:
+    return None
 
-    latest = data.iloc[-1]
-    price = safe_float(latest["Close"])
-    rsi_val = safe_float(latest["RSI"])
-    stoch_val = safe_float(latest["STOCH"])
-    sma20 = safe_float(latest["SMA20"])
-    sma50 = safe_float(latest["SMA50"])
-    sma200 = safe_float(latest["SMA200"])
+data["RSI"] = calculate_rsi(data["Close"])
+data["STOCH"] = calculate_stochastic(data)
+data["SMA20"] = data["Close"].rolling(20).mean()
+data["SMA50"] = data["Close"].rolling(50).mean()
+data["SMA200"] = data["Close"].rolling(200).mean()
 
-    support = safe_float(data.tail(60)["Low"].min())
-    resistance = safe_float(data.tail(60)["High"].max())
+latest = data.iloc[-1]
 
-    dist_support = ((price - support) / support) * 100 if support else np.nan
-    dist_resistance = ((resistance - price) / price) * 100 if price else np.nan
+price = safe_float(latest["Close"])
+rsi_val = safe_float(latest["RSI"])
+stoch_val = safe_float(latest["STOCH"])
+sma20 = safe_float(latest["SMA20"])
+sma50 = safe_float(latest["SMA50"])
+sma200 = safe_float(latest["SMA200"])
 
-    if price > sma20 > sma50 > sma200:
-        trend_1d = "Alcista fuerte"
-    elif price > sma50 and price > sma200:
-        trend_1d = "Alcista"
-    elif price < sma20 < sma50 < sma200:
-        trend_1d = "Bajista fuerte"
-    elif price < sma50 and price < sma200:
-        trend_1d = "Bajista"
-    else:
-        trend_1d = "Neutral"
+support = safe_float(data.tail(SUPPORT_RESISTANCE_WINDOW)["Low"].min())
+resistance = safe_float(data.tail(SUPPORT_RESISTANCE_WINDOW)["High"].max())
 
-    data_4h = download(ticker, "6mo", "4h")
-    data_1h = download(ticker, "2mo", "1h")
-    trend_4h = trend_from_data(data_4h)
-    trend_1h = trend_from_data(data_1h)
+dist_support = ((price - support) / support) * 100 if support and not pd.isna(support) else np.nan
+dist_resistance = ((resistance - price) / price) * 100 if price and not pd.isna(resistance) else np.nan
 
-    iv_rank = iv_rank_proxy(data)
+if price > sma20 > sma50 > sma200:
+    trend_1d = "Alcista fuerte"
+elif price > sma50 and price > sma200:
+    trend_1d = "Alcista"
+elif price < sma20 < sma50 < sma200:
+    trend_1d = "Bajista fuerte"
+elif price < sma50 and price < sma200:
+    trend_1d = "Bajista"
+else:
+    trend_1d = "Neutral"
 
-    signal = "NO TRADE"
+data_4h = download_data(ticker, "6mo", "4h")
+data_1h = download_data(ticker, "2mo", "1h")
+
+trend_4h = trend_from_data(data_4h)
+trend_1h = trend_from_data(data_1h)
+
+iv_rank = calculate_iv_rank_proxy(data)
+
+signal = "NO TRADE"
+
+if not pd.isna(rsi_val) and not pd.isna(dist_support):
     if rsi_val <= DEFAULT_PUT_RSI and dist_support <= 3:
         signal = "PUT / Bull Put Spread"
-    elif rsi_val >= DEFAULT_CALL_RSI and dist_resistance <= 4:
+
+if signal == "NO TRADE" and not pd.isna(rsi_val) and not pd.isna(dist_resistance):
+    if rsi_val >= DEFAULT_CALL_RSI and dist_resistance <= 4:
         signal = "CALL Spread"
 
-    score = score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance, sma200, trend_1d, trend_4h, trend_1h, iv_rank)
+score = score_setup(
+    signal,
+    price,
+    rsi_val,
+    stoch_val,
+    dist_support,
+    dist_resistance,
+    sma200,
+    trend_1d,
+    trend_4h,
+    trend_1h,
+    iv_rank,
+)
 
-    if score < MIN_SETUP_SCORE:
-        return None
+if score < MIN_SETUP_SCORE:
+    return None
 
-    return {
-        "ticker": ticker,
-        "price": round(price, 2),
-        "signal": signal,
-        "score": score,
-        "rsi": round(rsi_val, 1),
-        "stoch": round(stoch_val, 1),
-        "iv_rank": iv_rank,
-        "trend_1d": trend_1d,
-        "trend_4h": trend_4h,
-        "trend_1h": trend_1h,
-        "support": round(support, 2),
-        "resistance": round(resistance, 2),
-        "dist_support": round(dist_support, 2),
-        "dist_resistance": round(dist_resistance, 2)
-    }
+return {
+    "ticker": ticker,
+    "price": round(price, 2),
+    "signal": signal,
+    "score": score,
+    "rsi": round(rsi_val, 1),
+    "stoch": round(stoch_val, 1),
+    "iv_rank": iv_rank,
+    "trend_1d": trend_1d,
+    "trend_4h": trend_4h,
+    "trend_1h": trend_1h,
+    "support": round(support, 2) if not pd.isna(support) else np.nan,
+    "resistance": round(resistance, 2) if not pd.isna(resistance) else np.nan,
+    "dist_support": round(dist_support, 2) if not pd.isna(dist_support) else np.nan,
+    "dist_resistance": round(dist_resistance, 2) if not pd.isna(dist_resistance) else np.nan,
+}
+```
 
-sent = set()
+# =====================================================
 
-def alert_message(s):
-    tipo = "🔴 PREMIUM" if s["score"] >= 70 else "🟡 WATCHLIST"
-    return (
-        f"{tipo} OptionsView PRO\n"
-        f"{s['ticker']} · {s['signal']}\n"
-        f"Setup score: {s['score']}%\n"
-        f"Precio: {s['price']}\n"
-        f"RSI: {s['rsi']} | Stoch: {s['stoch']}\n"
-        f"IV Rank est.: {s['iv_rank']}%\n"
-        f"1D: {s['trend_1d']} | 4H: {s['trend_4h']} | 1H: {s['trend_1h']}\n"
-        f"Soporte: {s['support']} | Resistencia: {s['resistance']}\n"
-        f"Dist soporte: {s['dist_support']}% | Dist resistencia: {s['dist_resistance']}%\n"
-        f"Revisar earnings y cadena real antes de entrar."
-    )
+# ALERTA
+
+# =====================================================
+
+def alert_message(setup):
+tipo = "🔴 PREMIUM" if setup["score"] >= 70 else "🟡 WATCHLIST"
+
+```
+return (
+    f"{tipo} OptionsView PRO
+```
+
+"
+f"{setup['ticker']} · {setup['signal']}
+"
+f"Setup score: {setup['score']}%
+"
+f"Precio: {setup['price']}
+"
+f"RSI: {setup['rsi']} | Stoch: {setup['stoch']}
+"
+f"IV Rank est.: {setup['iv_rank']}%
+"
+f"1D: {setup['trend_1d']} | 4H: {setup['trend_4h']} | 1H: {setup['trend_1h']}
+"
+f"Soporte: {setup['support']} | Resistencia: {setup['resistance']}
+"
+f"Dist soporte: {setup['dist_support']}% | Dist resistencia: {setup['dist_resistance']}%
+"
+"Revisar earnings y cadena real antes de entrar."
+)
+
+# =====================================================
+
+# SCANNER UNA SOLA VEZ
+
+# =====================================================
 
 def scan_once():
-    tickers = get_universe()
-    print(f"Escaneando {len(tickers)} tickers...")
-    setups = []
+tickers = get_universe()
+print(f"Escaneando {len(tickers)} tickers...")
 
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            setup = analyze_ticker(ticker)
-            if setup:
-                setups.append(setup)
-                key = f"{setup['ticker']}-{setup['signal']}-{setup['score']}"
-                if key not in sent:
-                    sent.add(key)
-                    send_telegram(alert_message(setup))
-                    print(f"ALERTA: {setup['ticker']} {setup['score']}%")
-            if i % 25 == 0:
-                print(f"Procesados {i}/{len(tickers)}")
-            time.sleep(0.2)
-        except Exception as e:
-            print(f"Error {ticker}: {e}")
+```
+setups = []
 
-    print(f"Escaneo terminado. Setups encontrados: {len(setups)}")
-    return setups
+for i, ticker in enumerate(tickers, 1):
+    try:
+        setup = analyze_ticker(ticker)
 
-send_telegram("✅ OptionsView PRO: scanner SP500 + NASDAQ100 iniciado")
+        if setup:
+            setups.append(setup)
+            send_telegram(alert_message(setup))
+            print(f"ALERTA: {setup['ticker']} {setup['score']}%")
 
-while True:
-    print("Nuevo escaneo...")
-    scan_once()
-    print(f"Esperando {SCAN_INTERVAL_MINUTES} minutos...")
-    time.sleep(SCAN_INTERVAL_MINUTES * 60)
+        if i % 25 == 0:
+            print(f"Procesados {i}/{len(tickers)}")
+
+        time.sleep(0.15)
+
+    except Exception as e:
+        print(f"Error {ticker}: {e}")
+
+print(f"Escaneo terminado. Setups encontrados: {len(setups)}")
+return setups
+```
+
+# =====================================================
+
+# MAIN PARA GITHUB ACTIONS
+
+# =====================================================
+
+if **name** == "**main**":
+send_telegram("✅ OptionsView PRO: escaneo GitHub iniciado")
+
+```
+setups = scan_once()
+
+if len(setups) == 0:
+    print("No hay setups >= mínimo configurado.")
+
+send_telegram(f"✅ OptionsView PRO: escaneo GitHub finalizado. Setups encontrados: {len(setups)}")
+```
