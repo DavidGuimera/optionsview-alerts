@@ -1,37 +1,48 @@
-"""
-OptionsView PRO - Alerts Engine para GitHub Actions
-Escaneo cada hora + anti-duplicados 24h.
-"""
-
 import os
 import time
 import json
 import requests
+from math import erf, log, sqrt
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-MIN_SETUP_SCORE = 65
-MAX_TICKERS = 230
+# =====================================================
+# CONFIG
+# =====================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+MIN_SETUP_SCORE = int(os.getenv("MIN_SETUP_SCORE", "65"))
+MAX_TICKERS = int(os.getenv("MAX_TICKERS", "230"))
+
+DEFAULT_PERIOD = "1y"
 DEFAULT_PUT_RSI = 32
 DEFAULT_CALL_RSI = 68
+DEFAULT_DISTANCE_SUPPORT = 3.0
+DEFAULT_DISTANCE_RESISTANCE = 4.0
 SUPPORT_RESISTANCE_WINDOW = 60
+DEFAULT_SPREAD_WIDTH = 5
 
 ALERT_MEMORY_FILE = "alert_memory.json"
 ALERT_COOLDOWN_HOURS = 24
 
 
+# =====================================================
+# TELEGRAM
+# =====================================================
+
 def send_telegram(message):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Faltan variables Telegram")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
         return False
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
 
     try:
         r = requests.post(url, data=payload, timeout=10)
@@ -41,6 +52,10 @@ def send_telegram(message):
         print("Error Telegram:", e)
         return False
 
+
+# =====================================================
+# ANTI-DUPLICADOS 24H
+# =====================================================
 
 def load_alert_memory():
     if not os.path.exists(ALERT_MEMORY_FILE):
@@ -63,7 +78,6 @@ def save_alert_memory(memory):
 def recently_alerted(ticker, memory):
     if ticker not in memory:
         return False
-
     try:
         last_time = datetime.fromisoformat(memory[ticker])
         return datetime.utcnow() - last_time < timedelta(hours=ALERT_COOLDOWN_HOURS)
@@ -71,26 +85,77 @@ def recently_alerted(ticker, memory):
         return False
 
 
-def get_universe():
-    tickers = [
-        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA",
-        "MCD","PEP","PG","KO","COST","WMT","HD","LOW","JNJ",
-        "ABBV","MRK","UNH","XOM","CVX","PM","MDLZ","TROW",
-        "JPM","BAC","GS","MS","V","MA",
-        "AMD","AVGO","QCOM","CSCO","ADBE","CRM","INTU","PANW",
-        "AMAT","LRCX","KLAC","MU","ADI",
-        "SBUX","NKE","CMCSA","DIS","NFLX",
-        "CAT","HON","GE","RTX","DE",
-        "LLY","ISRG","TMO","ABT","GILD","VRTX"
+# =====================================================
+# SP500 + NASDAQ100
+# =====================================================
+
+def get_sp500_tickers():
+    fallback = [
+        "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","BRK-B","LLY","AVGO",
+        "JPM","V","MA","XOM","UNH","COST","WMT","HD","PG","JNJ","ABBV","NFLX",
+        "BAC","KO","MRK","CVX","CRM","AMD","PEP","TMO","ADBE","LIN","WFC","MCD",
+        "CSCO","ABT","QCOM","PM","IBM","TXN","GE","DHR","INTU","AMGN","CAT","VZ",
+        "NOW","ISRG","DIS","NEE","PFE","RTX","CMCSA","SPGI","UBER","UNP","LOW",
+        "GS","PGR","BKNG","T","AXP","HON","BLK","ETN","TJX","COP","BA","SYK",
+        "SCHW","VRTX","LMT","C","MDT","ADP","ELV","PANW","DE","FI","SBUX"
     ]
-    return tickers[:MAX_TICKERS]
 
-
-def safe_float(x):
     try:
-        if pd.isna(x):
+        df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        tickers = df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
+        return tickers if tickers else fallback
+    except Exception as e:
+        print("Fallback SP500:", e)
+        return fallback
+
+
+def get_nasdaq100_tickers():
+    fallback = [
+        "AAPL","MSFT","NVDA","AMZN","META","AVGO","GOOGL","GOOG","TSLA","COST",
+        "NFLX","ASML","TMUS","CSCO","PEP","ADBE","AMD","LIN","INTU","TXN",
+        "QCOM","AMGN","HON","ISRG","AMAT","BKNG","CMCSA","PANW","ADP","VRTX",
+        "GILD","SBUX","MU","ADI","LRCX","MELI","KLAC","MDLZ","CRWD","REGN",
+        "INTC","CTAS","PYPL","CEG","MAR","ORLY","SNPS","CDNS","CSX","ABNB"
+    ]
+
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+        for table in tables:
+            for col in table.columns:
+                if "ticker" in str(col).lower() or "symbol" in str(col).lower():
+                    tickers = table[col].astype(str).str.replace(".", "-", regex=False).tolist()
+                    tickers = [t for t in tickers if t and t.lower() != "nan"]
+                    if len(tickers) > 20:
+                        return tickers
+        return fallback
+    except Exception as e:
+        print("Fallback NASDAQ100:", e)
+        return fallback
+
+
+def get_universe():
+    tickers = get_sp500_tickers() + get_nasdaq100_tickers()
+    clean = []
+    seen = set()
+
+    for ticker in tickers:
+        ticker = str(ticker).upper().strip()
+        if ticker and ticker not in seen:
+            clean.append(ticker)
+            seen.add(ticker)
+
+    return clean[:MAX_TICKERS]
+
+
+# =====================================================
+# INDICADORES APP
+# =====================================================
+
+def safe_float(value):
+    try:
+        if pd.isna(value):
             return np.nan
-        return float(x)
+        return float(value)
     except Exception:
         return np.nan
 
@@ -100,100 +165,224 @@ def calculate_rsi(series, period=14):
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
 
-def calculate_stochastic(data, k_period=14):
-    low_min = data["Low"].rolling(k_period).min()
-    high_max = data["High"].rolling(k_period).max()
-    return 100 * ((data["Close"] - low_min) / (high_max - low_min))
+def calculate_stochastic(data, k_period=14, d_period=3):
+    low_min = data["Low"].rolling(window=k_period).min()
+    high_max = data["High"].rolling(window=k_period).max()
+
+    k = 100 * ((data["Close"] - low_min) / (high_max - low_min))
+    d = k.rolling(window=d_period).mean()
+
+    return k, d
+
+
+def download_data(ticker, period="1y", interval="1d"):
+    ticker = str(ticker).strip().upper()
+
+    for attempt in range(3):
+        try:
+            data = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+            )
+
+            if data is not None and not data.empty:
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+
+                data = data.dropna(subset=["Open", "High", "Low", "Close"])
+
+                if not data.empty:
+                    return data
+        except Exception:
+            pass
+
+        time.sleep(0.35 + attempt * 0.35)
+
+    return pd.DataFrame()
+
+
+def prepare_data(ticker, period="1y"):
+    data = download_data(ticker, period, "1d")
+
+    if data.empty:
+        return data
+
+    data["RSI"] = calculate_rsi(data["Close"])
+    data["STO_K"], data["STO_D"] = calculate_stochastic(data)
+
+    data["EMA21"] = data["Close"].ewm(span=21, adjust=False).mean()
+    data["SMA20"] = data["Close"].rolling(20).mean()
+    data["SMA50"] = data["Close"].rolling(50).mean()
+    data["SMA200"] = data["Close"].rolling(200).mean()
+
+    return data
+
+
+def get_support_resistance(data, window=60):
+    recent = data.tail(window)
+    return safe_float(recent["Low"].min()), safe_float(recent["High"].max())
 
 
 def calculate_iv_rank_proxy(data):
     try:
+        if data is None or data.empty or len(data) < 40:
+            return np.nan, np.nan
+
         returns = data["Close"].pct_change().dropna()
         hv20 = returns.rolling(20).std() * np.sqrt(252) * 100
         hv20 = hv20.dropna()
 
         if hv20.empty:
-            return np.nan
+            return np.nan, np.nan
 
-        current = safe_float(hv20.iloc[-1])
-        low = safe_float(hv20.min())
-        high = safe_float(hv20.max())
+        current_hv = safe_float(hv20.iloc[-1])
+        hv_min = safe_float(hv20.min())
+        hv_max = safe_float(hv20.max())
 
-        if high == low:
-            return np.nan
+        if pd.isna(current_hv) or pd.isna(hv_min) or pd.isna(hv_max) or hv_max == hv_min:
+            return round(current_hv, 1), np.nan
 
-        return round(((current - low) / (high - low)) * 100, 1)
+        iv_rank = ((current_hv - hv_min) / (hv_max - hv_min)) * 100
+
+        return round(current_hv, 1), round(max(0, min(100, iv_rank)), 1)
+
     except Exception:
-        return np.nan
+        return np.nan, np.nan
 
 
-def trend_from_data(data):
+def classify_trend(price, sma20, sma50, sma200):
+    if pd.isna(sma200):
+        if price > sma20 > sma50:
+            return "Alcista"
+        if price < sma20 < sma50:
+            return "Bajista"
+        return "Lateral / Mixta"
+
+    if price > sma20 > sma50 > sma200:
+        return "Alcista fuerte"
+
+    if price > sma50 and price > sma200:
+        return "Alcista"
+
+    if price < sma20 < sma50 < sma200:
+        return "Bajista fuerte"
+
+    if price < sma50 and price < sma200:
+        return "Bajista"
+
+    return "Lateral / Mixta"
+
+
+def detect_trend(data):
     try:
-        if data.empty or len(data) < 60:
+        if data is None or data.empty or len(data) < 60:
             return "Neutral"
 
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
         close = data["Close"].dropna()
+
+        if len(close) < 60:
+            return "Neutral"
+
         ema21 = close.ewm(span=21, adjust=False).mean().iloc[-1]
         sma50 = close.rolling(50).mean().iloc[-1]
         price = close.iloc[-1]
 
         if price > ema21 > sma50:
             return "Alcista"
+
         if price < ema21 < sma50:
             return "Bajista"
+
         return "Neutral"
+
     except Exception:
         return "Neutral"
 
 
-def download_data(ticker, period="1y", interval="1d"):
-    try:
-        data = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-            threads=False
-        )
+def round_to_option_strike(price):
+    if pd.isna(price):
+        return np.nan
 
-        if data is None or data.empty:
-            return pd.DataFrame()
+    if price >= 500:
+        step = 10
+    elif price >= 200:
+        step = 5
+    elif price >= 100:
+        step = 2.5
+    elif price >= 50:
+        step = 1
+    else:
+        step = 0.5
 
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-
-        return data.dropna()
-    except Exception as e:
-        print(f"Error descargando {ticker}: {e}")
-        return pd.DataFrame()
+    return round(price / step) * step
 
 
-def score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance,
-                sma200, trend_1d, trend_4h, trend_1h, iv_rank):
+def format_strike(value):
+    if pd.isna(value):
+        return ""
 
-    if signal == "NO TRADE":
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+# =====================================================
+# SCORE IGUAL QUE LA APP
+# =====================================================
+
+def calculate_setup_quality(
+    signal,
+    rsi,
+    sto_k,
+    dist_support,
+    dist_resistance,
+    trend,
+    price,
+    sma20,
+    sma50,
+    sma200,
+    iv_rank=np.nan,
+    trend_4h="Neutral",
+    trend_1h="Neutral"
+):
+    if signal in ["NO TRADE", "ERROR"]:
         return 0
 
     score = 45
+
+    bullish_trend = trend in ["Alcista", "Alcista fuerte"]
+    bearish_trend = trend in ["Bajista", "Bajista fuerte"]
 
     if signal == "PUT / Bull Put Spread":
         if not pd.isna(sma200):
             score += 18 if price > sma200 else -22
 
-        if trend_1d == "Alcista":
+        if bullish_trend:
             score += 12
+        elif bearish_trend:
+            score -= 15
+
         if trend_4h == "Alcista":
             score += 10
+        elif trend_4h == "Bajista":
+            score -= 10
+
         if trend_1h == "Alcista":
             score += 4
+        elif trend_1h == "Bajista":
+            score -= 4
 
         if dist_support <= 1.5:
             score += 16
@@ -202,26 +391,34 @@ def score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance
         elif dist_support > 8:
             score -= 10
 
-        if rsi_val <= 30:
+        if rsi <= 30:
             score += 6
-        elif rsi_val >= 55:
+        elif rsi >= 55:
             score -= 6
 
-        if stoch_val <= 20:
+        if sto_k <= 20:
             score += 3
-        elif stoch_val >= 80:
+        elif sto_k >= 80:
             score -= 3
 
     elif signal == "CALL Spread":
         if not pd.isna(sma200):
             score += 18 if price < sma200 else -12
 
-        if trend_1d == "Bajista":
+        if bearish_trend:
             score += 12
+        elif bullish_trend:
+            score -= 12
+
         if trend_4h == "Bajista":
             score += 10
+        elif trend_4h == "Alcista":
+            score -= 10
+
         if trend_1h == "Bajista":
             score += 4
+        elif trend_1h == "Alcista":
+            score -= 4
 
         if dist_resistance <= 1.5:
             score += 16
@@ -230,18 +427,20 @@ def score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance
         elif dist_resistance > 8:
             score -= 10
 
-        if rsi_val >= 70:
+        if rsi >= 70:
             score += 6
-        elif rsi_val <= 45:
+        elif rsi <= 45:
             score -= 6
 
-        if stoch_val >= 80:
+        if sto_k >= 80:
             score += 3
-        elif stoch_val <= 20:
+        elif sto_k <= 20:
             score -= 3
 
     if not pd.isna(iv_rank):
-        if iv_rank >= 60:
+        if iv_rank >= 80:
+            score += 10
+        elif iv_rank >= 60:
             score += 15
         elif iv_rank >= 40:
             score += 8
@@ -251,120 +450,245 @@ def score_setup(signal, price, rsi_val, stoch_val, dist_support, dist_resistance
     return int(max(0, min(100, round(score))))
 
 
+def quality_label(score):
+    if score >= 85:
+        return "Excepcional"
+    if score >= 70:
+        return "Muy bueno"
+    if score >= 50:
+        return "Bueno"
+    if score >= 35:
+        return "Aceptable"
+    if score > 0:
+        return "Flojo"
+    return "Sin setup"
+
+
+def advanced_risk_filter(signal, price, sma20, sma50, sma200, rsi, sto_k):
+    reasons = []
+    risk_level = "Bajo"
+
+    if signal == "PUT / Bull Put Spread":
+        if not pd.isna(sma200) and price < sma200:
+            reasons.append("Precio bajo SMA200")
+
+        if not pd.isna(sma20) and not pd.isna(sma50) and sma20 < sma50:
+            reasons.append("SMA20 bajo SMA50")
+
+        if not pd.isna(sma20) and not pd.isna(sma50) and not pd.isna(sma200) and sma20 < sma50 < sma200:
+            reasons.append("Tendencia bajista fuerte")
+
+        if rsi < 25:
+            reasons.append("RSI extremadamente bajo")
+
+    if signal == "CALL Spread":
+        if not pd.isna(sma20) and not pd.isna(sma50) and not pd.isna(sma200) and price > sma20 > sma50 > sma200:
+            reasons.append("Tendencia alcista fuerte")
+
+        if rsi > 78:
+            reasons.append("RSI extremadamente alto")
+
+    if len(reasons) >= 3:
+        risk_level = "Alto"
+    elif len(reasons) >= 1:
+        risk_level = "Medio"
+
+    return risk_level, reasons
+
+
+def position_recommendation(quality, risk):
+    contracts = 0
+    label = "Sin entrada"
+
+    if 50 <= quality < 70:
+        contracts = 1
+        label = "Entrada moderada"
+    elif 70 <= quality < 85:
+        contracts = 2
+        label = "Entrada fuerte"
+    elif quality >= 85:
+        contracts = 2
+        label = "Setup excepcional"
+
+    if risk == "Alto":
+        contracts = max(0, contracts - 1)
+        label = "Riesgo alto: reducir/revisar"
+
+    return contracts, label
+
+
+# =====================================================
+# ANALYZE TICKER
+# =====================================================
+
 def analyze_ticker(ticker):
-    data = download_data(ticker)
+    data = prepare_data(ticker, DEFAULT_PERIOD)
 
-    if data.empty or len(data) < 200:
+    if data.empty or len(data) < 80:
         return None
-
-    data["RSI"] = calculate_rsi(data["Close"])
-    data["STOCH"] = calculate_stochastic(data)
-    data["SMA200"] = data["Close"].rolling(200).mean()
 
     latest = data.iloc[-1]
 
     price = safe_float(latest["Close"])
-    rsi_val = safe_float(latest["RSI"])
-    stoch_val = safe_float(latest["STOCH"])
+    rsi = safe_float(latest["RSI"])
+    sto_k = safe_float(latest["STO_K"])
+
+    sma20 = safe_float(latest["SMA20"])
+    sma50 = safe_float(latest["SMA50"])
     sma200 = safe_float(latest["SMA200"])
 
-    support = safe_float(data.tail(SUPPORT_RESISTANCE_WINDOW)["Low"].min())
-    resistance = safe_float(data.tail(SUPPORT_RESISTANCE_WINDOW)["High"].max())
+    support, resistance = get_support_resistance(data, SUPPORT_RESISTANCE_WINDOW)
 
     dist_support = ((price - support) / support) * 100 if support else np.nan
-    dist_resistance = ((resistance - price) / price) * 100 if resistance else np.nan
+    dist_resistance = ((resistance - price) / price) * 100 if price else np.nan
 
-    data_4h = download_data(ticker, "6mo", "4h")
-    data_1h = download_data(ticker, "2mo", "1h")
+    trend = classify_trend(price, sma20, sma50, sma200)
 
-    trend_1d = trend_from_data(data)
-    trend_4h = trend_from_data(data_4h)
-    trend_1h = trend_from_data(data_1h)
-
-    iv_rank = calculate_iv_rank_proxy(data)
+    put_setup = rsi <= DEFAULT_PUT_RSI and dist_support <= DEFAULT_DISTANCE_SUPPORT
+    call_setup = rsi >= DEFAULT_CALL_RSI and dist_resistance <= DEFAULT_DISTANCE_RESISTANCE
 
     signal = "NO TRADE"
 
-    if not pd.isna(rsi_val) and not pd.isna(dist_support):
-        if rsi_val <= DEFAULT_PUT_RSI and dist_support <= 3:
-            signal = "PUT / Bull Put Spread"
+    if put_setup:
+        signal = "PUT / Bull Put Spread"
 
-    if signal == "NO TRADE" and not pd.isna(rsi_val) and not pd.isna(dist_resistance):
-        if rsi_val >= DEFAULT_CALL_RSI and dist_resistance <= 4:
-            signal = "CALL Spread"
+    if call_setup:
+        signal = "CALL Spread"
 
-    score = score_setup(
+    if put_setup and call_setup:
+        signal = "NO TRADE"
+
+    estrategia = ""
+
+    if signal == "PUT / Bull Put Spread":
+        base_put = min(support, price * 0.93)
+        put_short = round_to_option_strike(base_put)
+        put_long = put_short - DEFAULT_SPREAD_WIDTH
+        estrategia = f"{format_strike(put_short)}/{format_strike(put_long)} Bull Put Spread"
+
+    elif signal == "CALL Spread":
+        base_call = max(resistance, price * 1.07)
+        call_short = round_to_option_strike(base_call)
+        call_long = call_short + DEFAULT_SPREAD_WIDTH
+        estrategia = f"{format_strike(call_short)}/{format_strike(call_long)} Bear Call Spread"
+
+    risk, reasons = advanced_risk_filter(signal, price, sma20, sma50, sma200, rsi, sto_k)
+
+    _, iv_rank_est = calculate_iv_rank_proxy(data)
+
+    try:
+        data_4h = download_data(ticker, "6mo", "4h")
+        data_1h = download_data(ticker, "2mo", "1h")
+
+        trend_4h = detect_trend(data_4h)
+        trend_1h = detect_trend(data_1h)
+    except Exception:
+        trend_4h = "Neutral"
+        trend_1h = "Neutral"
+
+    quality = calculate_setup_quality(
         signal,
-        price,
-        rsi_val,
-        stoch_val,
+        rsi,
+        sto_k,
         dist_support,
         dist_resistance,
+        trend,
+        price,
+        sma20,
+        sma50,
         sma200,
-        trend_1d,
+        iv_rank_est,
         trend_4h,
         trend_1h,
-        iv_rank
     )
 
-    if score < MIN_SETUP_SCORE:
+    contracts, entry_label = position_recommendation(quality, risk)
+
+    if quality < MIN_SETUP_SCORE:
         return None
 
     return {
-        "ticker": ticker,
-        "signal": signal,
-        "score": score,
-        "price": round(price, 2),
-        "rsi": round(rsi_val, 1),
-        "iv_rank": iv_rank,
-        "trend_1d": trend_1d,
-        "trend_4h": trend_4h,
-        "trend_1h": trend_1h
+        "Ticker": ticker,
+        "Precio": round(price, 2),
+        "Señal": signal,
+        "Calidad setup %": quality,
+        "Calidad": quality_label(quality),
+        "Riesgo": risk,
+        "Contratos sugeridos": contracts,
+        "Entrada sugerida": entry_label,
+        "Estrategia sugerida": estrategia,
+        "RSI": round(rsi, 2),
+        "Estocástico K": round(sto_k, 2),
+        "Soporte 60D": round(support, 2),
+        "Resistencia 60D": round(resistance, 2),
+        "Distancia soporte %": round(dist_support, 2),
+        "Distancia resistencia %": round(dist_resistance, 2),
+        "IV Rank estimado %": iv_rank_est,
+        "Trend 4H": trend_4h,
+        "Trend 1H": trend_1h,
+        "Advertencia": "; ".join(reasons),
     }
 
 
-def alert_message(setup):
-    tipo = "🔴 PREMIUM" if setup["score"] >= 70 else "🟡 WATCHLIST"
+# =====================================================
+# MENSAJE TELEGRAM
+# =====================================================
+
+def alert_message(row):
+    score = safe_float(row.get("Calidad setup %", 0))
+
+    tipo = (
+        "🔥 SETUP ÉLITE"
+        if score >= 85
+        else "🔴 PREMIUM"
+        if score >= 70
+        else "🟡 WATCHLIST"
+    )
 
     return (
         f"{tipo} OptionsView PRO\n\n"
-        f"{setup['ticker']}\n"
-        f"{setup['signal']}\n\n"
-        f"⭐ Setup Score: {setup['score']}%\n"
-        f"💲 Precio: {setup['price']}\n"
-        f"📉 RSI: {setup['rsi']}\n"
-        f"🔥 IV Rank: {setup['iv_rank']}%\n\n"
-        f"📈 1D: {setup['trend_1d']}\n"
-        f"📈 4H: {setup['trend_4h']}\n"
-        f"📈 1H: {setup['trend_1h']}\n\n"
-        f"⚠️ Revisar cadena real antes de entrar"
+        f"{row.get('Ticker')} · {row.get('Señal')}\n"
+        f"Setup score APP: {row.get('Calidad setup %')}% · {row.get('Calidad')}\n"
+        f"Precio: {row.get('Precio')}\n"
+        f"Estrategia: {row.get('Estrategia sugerida') or 'Sin spread'}\n"
+        f"Contratos: {row.get('Contratos sugeridos')} · {row.get('Entrada sugerida')}\n\n"
+        f"RSI: {row.get('RSI')} · Stoch K: {row.get('Estocástico K')}\n"
+        f"IV Rank est.: {row.get('IV Rank estimado %')}%\n"
+        f"Soporte: {row.get('Soporte 60D')} · Resistencia: {row.get('Resistencia 60D')}\n"
+        f"Dist soporte: {row.get('Distancia soporte %')}% · Dist resistencia: {row.get('Distancia resistencia %')}%\n\n"
+        f"Riesgo: {row.get('Riesgo')}\n"
+        f"4H: {row.get('Trend 4H')} · 1H: {row.get('Trend 1H')}\n"
+        f"Advertencia: {row.get('Advertencia') or 'Sin advertencias'}\n\n"
+        f"Revisar earnings y cadena real antes de entrar."
     )
 
+
+# =====================================================
+# SCAN
+# =====================================================
 
 def scan_once():
     tickers = get_universe()
     memory = load_alert_memory()
-
-    print(f"Escaneando {len(tickers)} tickers...")
-
     setups = []
+
+    print(f"Escaneando {len(tickers)} tickers SP500 + NASDAQ100 con parámetros APP...")
 
     for i, ticker in enumerate(tickers, 1):
         try:
-            setup = analyze_ticker(ticker)
+            row = analyze_ticker(ticker)
 
-            if setup:
-                if recently_alerted(setup["ticker"], memory):
-                    print(f"Duplicado evitado: {setup['ticker']}")
-                    continue
+            if row:
+                ticker_key = row["Ticker"]
 
-                setups.append(setup)
-                send_telegram(alert_message(setup))
-
-                memory[setup["ticker"]] = datetime.utcnow().isoformat()
-                save_alert_memory(memory)
-
-                print(f"ALERTA: {setup['ticker']} {setup['score']}%")
+                if recently_alerted(ticker_key, memory):
+                    print(f"Duplicado evitado 24h: {ticker_key}")
+                else:
+                    setups.append(row)
+                    send_telegram(alert_message(row))
+                    memory[ticker_key] = datetime.utcnow().isoformat()
+                    save_alert_memory(memory)
+                    print(f"ALERTA: {ticker_key} {row.get('Calidad setup %')}%")
 
             if i % 10 == 0:
                 print(f"Procesados {i}/{len(tickers)}")
@@ -374,14 +698,14 @@ def scan_once():
         except Exception as e:
             print(f"Error {ticker}: {e}")
 
-    print(f"Escaneo terminado. Setups encontrados: {len(setups)}")
+    print(f"Escaneo terminado. Setups nuevos: {len(setups)}")
     return setups
 
 
+# =====================================================
+# MAIN GITHUB ACTIONS
+# =====================================================
+
 if __name__ == "__main__":
     setups = scan_once()
-
-    send_telegram(
-        f"✅ Escaneo finalizado. "
-        f"Setups nuevos encontrados: {len(setups)}"
-    )
+    send_telegram(f"✅ Escaneo finalizado. Setups nuevos encontrados: {len(setups)}")
