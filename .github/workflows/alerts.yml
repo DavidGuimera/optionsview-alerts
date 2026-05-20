@@ -1,42 +1,40 @@
-name: OptionsView PRO Alerts
+name: OptionsView Alerts SAFE
 
 on:
-  schedule:
-    # Lunes a viernes, 30 min después del cierre aprox. NY.
-    # En horario de verano NY son las 20:30 UTC; en invierno puede cambiar.
-    - cron: "30 20 * * 1-5"
   workflow_dispatch:
 
+  schedule:
+    - cron: "0 13 * * 1-5"
+    - cron: "0 16 * * 1-5"
+    - cron: "0 19 * * 1-5"
+
 jobs:
-  scan-alerts:
+  run-alerts:
+
     runs-on: ubuntu-latest
 
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      TICKERS: "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
+
+      MIN_SCORE: "60"
+      MAX_ALERTS: "10"
+
     steps:
-      - name: Checkout repository
+
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas numpy requests lxml html5lib beautifulsoup4
+          pip install yfinance pandas numpy ta requests
 
-      - name: Run OptionsView PRO alerts
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TICKERS: "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
-          MIN_SCORE: "60"
-          MAX_ALERTS: "10"
+      - name: Run alerts engine
         run: python alerts_engine.py
-
-      - name: Upload scan CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: optionsview-alerts-scan
-          path: optionsview_alerts_scan.csv
-          if-no-files-found: ignore
