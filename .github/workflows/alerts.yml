@@ -32,7 +32,7 @@ jobs:
           TICKERS: "MCD,PEP,PG,COST,NVDA,AAPL,MSFT,V,KO,SBUX,HD,LOW,WMT,JPM,MA,GOOGL,AMZN,META"
           MIN_SCORE: "60"
           MAX_ALERTS: "10"
-        run: python optionsview_github_alerts_pro.py
+        run: python alerts_engine.py
 
       - name: Upload scan CSV
         uses: actions/upload-artifact@v4
