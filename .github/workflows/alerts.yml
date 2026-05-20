@@ -1,16 +1,18 @@
-name: OptionsView Alerts
+name: OptionsView PRO Alerts
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    # Lunes a viernes, 30 min después del cierre aprox. NY.
+    # En horario de verano NY son las 20:30 UTC; en invierno puede cambiar.
+    - cron: "30 20 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  run-alerts:
+  scan-alerts:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -19,12 +21,22 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests lxml html5lib beautifulsoup4
 
-      - name: Run scanner
+      - name: Run OptionsView PRO alerts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MIN_SETUP_SCORE: 65
-          MAX_TICKERS: 230
-        run: python alerts_engine.py
+          TICKERS: "MCD,PEP,PG,COST,NVDA,AAPL,MSFT,V,KO,SBUX,HD,LOW,WMT,JPM,MA,GOOGL,AMZN,META"
+          MIN_SCORE: "60"
+          MAX_ALERTS: "10"
+        run: python optionsview_github_alerts_pro.py
+
+      - name: Upload scan CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: optionsview-alerts-scan
+          path: optionsview_alerts_scan.csv
+          if-no-files-found: ignore
