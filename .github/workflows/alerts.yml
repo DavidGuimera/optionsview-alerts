@@ -2,39 +2,41 @@ name: OptionsView Alerts SAFE
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "0 13 * * 1-5"
     - cron: "0 16 * * 1-5"
     - cron: "0 19 * * 1-5"
 
 jobs:
-  run-alerts:
-
+  scan-alerts:
     runs-on: ubuntu-latest
 
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-      TICKERS: "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
-
-      MIN_SCORE: "60"
-      MAX_ALERTS: "10"
-
     steps:
-
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install yfinance pandas numpy ta requests
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests lxml html5lib beautifulsoup4
 
-      - name: Run alerts engine
+      - name: Run OptionsView PRO SAFE alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TICKERS: "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
+          MIN_SCORE: "60"
+          MAX_ALERTS: "10"
         run: python alerts_engine.py
+
+      - name: Upload scan CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: optionsview-alerts-scan
+          path: optionsview_alerts_scan.csv
+          if-no-files-found: ignore
