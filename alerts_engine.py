@@ -35,6 +35,15 @@ def bucket_for(ticker):
     return "OTHER"
 
 
+def signal_id(r):
+    """Stable human-readable ID for this scan signal."""
+    date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    s1 = str(r.short_strike).replace(".0", "").replace(".", "p")
+    s2 = str(r.long_strike).replace(".0", "").replace(".", "p")
+    side = "P" if r.signal == "PUT" else "C"
+    return f"{r.ticker}-{date}-{s1}{side}{s2}{side}"
+
+
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram secrets missing. Message not sent:")
@@ -74,18 +83,24 @@ def diversify(results):
 def alert_message(results):
     now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines=[
-        f"🔥 OptionsView ALGO v1 · {now}",
+        f"🔥 OptionsView ALGO v1.1 · {now}",
         f"Core: {CORE_VERSION}",
         f"Universo: {len(TICKERS)} | Umbral prob. éxito: {MIN_WIN_PROB:g}%",
         ""
     ]
     for r in results:
+        sid = signal_id(r)
+        adj = r.probability_adjustment if r.probability_adjustment is not None else 0
+        adj_txt = f"{adj:+.1f} pp"
         lines += [
             f"🚨 {r.ticker} | Prob. éxito estimada: {fmt(r.win_probability,'%')} | PASS ✅",
+            f"ID: {sid}",
             f"{r.spread} · {r.dte} DTE · Máx {r.contracts} contrato(s)",
             f"Precio: ${fmt(r.price)} | RSI: {fmt(r.rsi)}",
-            f"Short delta: {fmt(abs(r.delta))} | Prob OTM: {fmt(r.prob_otm,'%')}",
-            f"Crédito: ${fmt(r.credit)} | ROC neto: {fmt(r.net_roc,'%')} | Riesgo neto: ${fmt(r.net_max_loss)}",
+            f"Prob OTM base: {fmt(r.prob_otm,'%')} | Ajuste ALGO: {adj_txt}",
+            f"Short delta: {fmt(abs(r.delta))}",
+            f"Crédito detectado: ${fmt(r.credit)} | NO ENTRAR < ${fmt(r.min_entry_credit)}",
+            f"ROC neto: {fmt(r.net_roc,'%')} | Riesgo neto: ${fmt(r.net_max_loss)}",
             f"EM: ±${fmt(r.expected_move)} | Short: {fmt(r.em_distance)}× EM",
             f"HVR/IVR proxy: {fmt(r.iv_rank,'%')} | IV short: {fmt(r.short_iv,'%')}",
             f"OI: {fmt(r.oi)} | Bid/Ask: {fmt(r.bid_ask_spread_pct,'%')} | Liquidez: {r.liquidity}",
@@ -95,7 +110,7 @@ def alert_message(results):
             ""
         ]
     lines += [
-        "⚠️ Probabilidad ESTIMADA, todavía no calibrada. Verifica precio/Greeks en IBKR antes de ejecutar."
+        "⚠️ Probabilidad ESTIMADA, todavía no calibrada. Ejecuta solo si IBKR confirma strikes/vencimiento, delta razonable y crédito >= mínimo indicado."
     ]
     return "\n".join(lines).strip()
 
@@ -103,7 +118,7 @@ def alert_message(results):
 def no_alert_message(top_reviewed):
     now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines=[
-        f"✅ OptionsView ALGO v1: sin setups ejecutables >= {MIN_WIN_PROB:g}%",
+        f"✅ OptionsView ALGO v1.1: sin setups ejecutables >= {MIN_WIN_PROB:g}%",
         f"Core: {CORE_VERSION}",
         f"Universo revisado: {len(TICKERS)}",
         "",
@@ -118,12 +133,19 @@ def no_alert_message(top_reviewed):
 def write_csv(all_results):
     if not all_results:
         return
+    scan_time = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for r in all_results:
+        d = r.to_dict()
+        d["scan_time_utc"] = scan_time
+        d["signal_id"] = signal_id(r) if r.short_strike is not None and r.long_strike is not None else ""
+        rows.append(d)
+
+    fieldnames = list(rows[0].keys())
     with open("optionsview_alerts_scan.csv","w",newline="") as f:
-        fieldnames=list(all_results[0].to_dict().keys())
         w=csv.DictWriter(f,fieldnames=fieldnames)
         w.writeheader()
-        for r in all_results:
-            w.writerow(r.to_dict())
+        w.writerows(rows)
 
 
 def main():
