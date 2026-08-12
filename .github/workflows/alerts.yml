@@ -1,4 +1,4 @@
-name: OptionsView Alerts ALGO v1
+name: OptionsView Alerts ALGO v1.1
 
 on:
   workflow_dispatch:
