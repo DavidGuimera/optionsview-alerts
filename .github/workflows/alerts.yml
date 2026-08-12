@@ -1,8 +1,7 @@
-name: OptionsView Alerts ALGO v1.1
+name: OptionsView Alerts ALGO v1.3 · 100
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "15 15 * * 1-5"
     - cron: "15 18 * * 1-5"
@@ -12,35 +11,34 @@ permissions:
 
 jobs:
   scan-alerts:
-
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
-
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests
 
-      - name: Run OptionsView Algo
+      - name: Run OptionsView scan
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
+          TICKERS: "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,ORCL,CSCO,AMD,INTC,MU,QCOM,TXN,AMAT,JPM,MA,V,BLK,SCHW,BAC,WFC,C,GS,MS,XOM,CVX,COP,SLB,OXY,UNH,ABBV,MRK,PFE,LLY,GILD,AMGN,CVS,CAT,DE,GE,HON,UPS,BA,RTX,LMT,DIS,NFLX,TSLA,NKE,BKNG,ABNB,GM,F,NEE,DUK,SO,LIN,FCX,NEM,PLD,AMT,SPY,QQQ,IWM,DIA,XLP,XLV,XLF,XLE,XLI,XLK,XLY,XLU,SMH,SOXX,TLT,GLD,SLV,USO,EEM,FXI,ARKK,IBM,PYPL"
           MIN_WIN_PROB: "68"
-          MAX_ALERTS: "6"
+          MAX_ALERTS: "10"
           MAX_RISK_PER_TRADE: "500"
-          MAX_PER_BUCKET: "2"
-
+          COMMISSION_PER_CONTRACT_RT: "2.80"
         run: python alerts_engine.py
 
       - name: Append scan to permanent history
@@ -50,9 +48,7 @@ jobs:
         run: |
           git config user.name "optionsview-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add data/optionsview_history.csv
-
           if git diff --cached --quiet; then
             echo "No history changes to commit."
           else
@@ -60,11 +56,9 @@ jobs:
             git push
           fi
 
-      - name: Upload scan log
-        if: always()
+      - name: Upload scan backup
         uses: actions/upload-artifact@v4
         with:
-          name: optionsview-scan-${{ github.run_number }}
+          name: optionsview-scan-${{ github.run_id }}
           path: optionsview_alerts_scan.csv
-          if-no-files-found: ignore
           retention-days: 90
