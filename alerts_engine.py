@@ -130,48 +130,149 @@ def no_alert_message(top_reviewed):
     return "\n".join(lines)
 
 
-def write_csv(all_results):
-    if not all_results:
+def write_csv(scan_rows):
+    """Write exactly one row per ticker attempted in this scan."""
+    if not scan_rows:
         return
-    scan_time = datetime.now(timezone.utc).isoformat()
-    rows = []
-    for r in all_results:
-        d = r.to_dict()
-        d["scan_time_utc"] = scan_time
-        d["signal_id"] = signal_id(r) if r.short_strike is not None and r.long_strike is not None else ""
-        rows.append(d)
 
-    fieldnames = list(rows[0].keys())
-    snapshot_name = "optionsview_alerts_scan.csv"
-    with open(snapshot_name,"w",newline="") as f:
-        w=csv.DictWriter(f,fieldnames=fieldnames)
+    # Union of all keys so ERROR rows and normal rows fit in one CSV.
+    fieldnames = []
+    seen = set()
+    for row in scan_rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+
+    with open("optionsview_alerts_scan.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
-        w.writerows(rows)
-
+        for row in scan_rows:
+            w.writerow({k: row.get(k, "") for k in fieldnames})
 
 def main():
-    all_results=[]
+    all_results = []
+    scan_rows = []
+    scan_time = datetime.now(timezone.utc).isoformat()
+
     for ticker in TICKERS:
+        ticker = ticker.strip().upper()
         try:
-            r=analyze_ticker(ticker,min_score=MIN_WIN_PROB,max_risk=MAX_RISK_PER_TRADE)
-            all_results.append(r)
-            print(
-                f"{ticker}: Pwin={r.win_probability} tech={r.technical_score} "
-                f"optQ={r.options_quality_score} exec={r.executable} reason={r.reject_reason}"
+            r = analyze_ticker(
+                ticker,
+                min_score=MIN_WIN_PROB,
+                max_risk=MAX_RISK_PER_TRADE
             )
+            all_results.append(r)
+
+            row = r.to_dict()
+            row["scan_time_utc"] = scan_time
+            row["signal_id"] = (
+                signal_id(r)
+                if r.short_strike is not None and r.long_strike is not None
+                else ""
+            )
+
+            # Explicit historical classification.
+            if r.executable:
+                history_status = "PASS"
+            elif r.data_status == "ERROR":
+                history_status = "ERROR"
+            elif r.signal == "NO TRADE":
+                history_status = "NO_SETUP"
+            elif "chain" in (r.reject_reason or "").lower() or "cadena" in (r.reject_reason or "").lower():
+                history_status = "NO_VALID_CHAIN"
+            else:
+                history_status = "REJECT"
+
+            row["history_status"] = history_status
+            row["scan_error"] = ""
+            scan_rows.append(row)
+
+            print(
+                f"{ticker}: status={history_status} "
+                f"Pwin={r.win_probability} tech={r.technical_score} "
+                f"optQ={r.options_quality_score} exec={r.executable} "
+                f"reason={r.reject_reason}"
+            )
+
         except Exception as e:
+            # CRITICAL: an exception must still create one historical row.
+            error_row = {
+                "ticker": ticker,
+                "core_version": CORE_VERSION,
+                "data_status": "ERROR",
+                "price": "",
+                "rsi": "",
+                "signal": "ERROR",
+                "technical_score": "",
+                "options_quality_score": "",
+                "win_probability": "",
+                "probability_adjustment": "",
+                "min_entry_credit": "",
+                "contracts": 0,
+                "spread": "",
+                "short_strike": "",
+                "long_strike": "",
+                "expiration": "",
+                "dte": "",
+                "earnings_date": "",
+                "earnings_days": "",
+                "earnings_status": "UNKNOWN",
+                "credit": "",
+                "commission_rt": "",
+                "max_loss": "",
+                "net_max_loss": "",
+                "roc": "",
+                "net_roc": "",
+                "prob_otm": "",
+                "delta": "",
+                "delta_source": "",
+                "iv_rank": "",
+                "short_iv": "",
+                "expected_move": "",
+                "em_distance": "",
+                "liquidity": "",
+                "oi": "",
+                "bid_ask_spread_pct": "",
+                "reject_reason": "Exception during analyze_ticker",
+                "executable": False,
+                "final_score": "",
+                "options_score": "",
+                "scan_time_utc": scan_time,
+                "signal_id": "",
+                "history_status": "ERROR",
+                "scan_error": str(e),
+            }
+            scan_rows.append(error_row)
             print(f"{ticker}: ERROR {e}")
+
         time.sleep(0.6)
 
-    write_csv(all_results)
+    # Historical invariant: 1 row per requested ticker.
+    print(f"HISTORY CHECK: requested={len(TICKERS)} rows={len(scan_rows)}")
+    if len(scan_rows) != len(TICKERS):
+        print("WARNING: historical row count does not match ticker count")
 
-    executable=[r for r in all_results if r.executable]
-    executable.sort(key=lambda x:(x.win_probability or 0,x.options_quality_score or 0,x.net_roc or 0),reverse=True)
-    selected=diversify(executable)
+    write_csv(scan_rows)
 
-    top_reviewed=sorted(
+    executable = [r for r in all_results if r.executable]
+    executable.sort(
+        key=lambda x: (
+            x.win_probability or 0,
+            x.options_quality_score or 0,
+            x.net_roc or 0
+        ),
+        reverse=True
+    )
+    selected = diversify(executable)
+
+    top_reviewed = sorted(
         all_results,
-        key=lambda x:(x.win_probability or 0,x.technical_score or 0),
+        key=lambda x: (
+            x.win_probability or 0,
+            x.technical_score or 0
+        ),
         reverse=True
     )
 
@@ -181,5 +282,5 @@ def main():
         send_telegram(no_alert_message(top_reviewed))
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
