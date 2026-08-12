@@ -83,7 +83,7 @@ def diversify(results):
 def alert_message(results):
     now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines=[
-        f"🔥 OptionsView ALGO v1.1 · {now}",
+        f"🔥 OptionsView ALGO v1.3 · {now}",
         f"Core: {CORE_VERSION}",
         f"Universo: {len(TICKERS)} | Umbral prob. éxito: {MIN_WIN_PROB:g}%",
         ""
@@ -118,7 +118,7 @@ def alert_message(results):
 def no_alert_message(top_reviewed):
     now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines=[
-        f"✅ OptionsView ALGO v1.1: sin setups ejecutables >= {MIN_WIN_PROB:g}%",
+        f"✅ OptionsView ALGO v1.3: sin setups ejecutables >= {MIN_WIN_PROB:g}%",
         f"Core: {CORE_VERSION}",
         f"Universo revisado: {len(TICKERS)}",
         "",
@@ -142,7 +142,8 @@ def write_csv(all_results):
         rows.append(d)
 
     fieldnames = list(rows[0].keys())
-    with open("optionsview_alerts_scan.csv","w",newline="") as f:
+    snapshot_name = "optionsview_alerts_scan.csv"
+    with open(snapshot_name,"w",newline="") as f:
         w=csv.DictWriter(f,fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
