@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-CORE_VERSION = "2026.08.12-algo-v1"
+CORE_VERSION = "2026.08.12-algo-v1.1"
 
 DEFAULT_TICKERS = "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
 
@@ -43,6 +43,7 @@ MIN_EM_DISTANCE = 0.55       # short strike must be >= 0.55 expected moves away
 EARNINGS_BLOCK_DAYS = 14
 COMMISSION_PER_CONTRACT_LEG = 0.65  # estimate; 2 legs x open+close
 DEFAULT_MAX_RISK_PER_TRADE = 500.0
+MIN_EXECUTION_CREDIT_RATIO = 0.94  # do not enter if live credit falls below 94% of scanned credit
 
 
 def safe_float(x, default=np.nan):
@@ -268,6 +269,8 @@ class SetupResult:
     technical_score: int
     options_quality_score: Optional[int]
     win_probability: Optional[float]
+    probability_adjustment: Optional[float]
+    min_entry_credit: Optional[float]
     contracts: int
     spread: str
     short_strike: Optional[float]
@@ -423,7 +426,7 @@ def contracts_for_trade(win_probability, net_max_loss, max_risk=DEFAULT_MAX_RISK
 def empty_result(ticker, reason, price=np.nan, rv=np.nan, signal="NO TRADE",
                  tech_score=0, iv_rank=np.nan, earnings_date="No disponible",
                  earnings_days=None, earnings_status="UNKNOWN", status="ERROR"):
-    return SetupResult(ticker,CORE_VERSION,status,price,rv,signal,tech_score,None,None,0,"",
+    return SetupResult(ticker,CORE_VERSION,status,price,rv,signal,tech_score,None,None,None,None,0,"",
                        None,None,"",None,earnings_date,earnings_days,earnings_status,
                        None,None,None,None,None,None,None,None,None,"N/A",iv_rank,None,None,None,
                        "No disponible",None,None,reason,False)
@@ -458,6 +461,8 @@ def analyze_ticker(ticker, min_score=60, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
         return empty_result(ticker,opt.get("reason","Opciones no válidas"),price,rv,signal,tech_score,iv_rank,edate,edays,estatus,status="OK_NO_EXECUTABLE_OPTIONS")
 
     winp = float(opt["win_probability"])
+    prob_adj = round(winp - float(opt["prob_otm"]), 1)
+    min_entry_credit = round(float(opt["credit"]) * MIN_EXECUTION_CREDIT_RATIO, 2)
     contracts = contracts_for_trade(winp,opt["net_max_loss"],max_risk=max_risk)
     spread = f"{opt['short']:g}/{opt['long']:g} {'PCS' if signal=='PUT' else 'CCS'}"
     executable = winp >= float(min_score) and contracts>0
@@ -467,6 +472,7 @@ def analyze_ticker(ticker, min_score=60, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
         ticker=ticker,core_version=CORE_VERSION,data_status="OK_EXECUTABLE_OPTIONS",
         price=price,rsi=rv,signal=signal,technical_score=tech_score,
         options_quality_score=opt["options_quality_score"],win_probability=winp,
+        probability_adjustment=prob_adj,min_entry_credit=min_entry_credit,
         contracts=contracts,spread=spread,short_strike=opt["short"],long_strike=opt["long"],
         expiration=opt["expiration"],dte=opt["dte"],earnings_date=edate,earnings_days=edays,
         earnings_status=estatus,credit=opt["credit"],commission_rt=opt["commission_rt"],
