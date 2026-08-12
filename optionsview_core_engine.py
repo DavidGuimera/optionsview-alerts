@@ -1,29 +1,48 @@
 """
-OptionsView Core Engine v4 - EXECUTABLE ALERTS ONLY
-- Shared engine for GitHub alerts.
-- Sends only setups with valid option-chain data.
-- Rejects fake/fallback values: credit 0, ROC 0, Delta 0, Prob OTM 100, missing OI, bad bid/ask.
+OptionsView Algo v1 — GitHub / yfinance forward-test engine
+
+IMPORTANT
+- win_probability is an ESTIMATED probability, not a guaranteed/calibrated probability.
+- It starts from option-implied Prob OTM and applies small, capped adjustments.
+- Technical/options scores remain diagnostic only.
+- Hard filters decide executability BEFORE an alert can be sent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 from math import erf, log, sqrt
-from typing import Optional, List, Dict, Any
-
+from typing import Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-CORE_VERSION = "2026.05.20-executable-v4"
+CORE_VERSION = "2026.08.12-algo-v1"
+
 DEFAULT_TICKERS = "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,JPM,MA,V,BLK,SCHW,SPY,QQQ,IWM,XLP,XLV,XLF"
+
 CONTRACT_MULTIPLIER = 100
 RISK_FREE_RATE = 0.045
+
 TARGET_DTE = 35
 MIN_DTE = 25
 MAX_DTE = 50
 SPREAD_WIDTHS = [2.5, 5, 10]
+
+# Hard execution filters
+MIN_PROB_OTM = 65.0
+MAX_PROB_OTM = 92.0
+MIN_SHORT_DELTA = 0.08
+MAX_SHORT_DELTA = 0.30
+MIN_OI = 100
+MAX_BID_ASK_PCT = 25.0
+MIN_NET_ROC = 6.0
+MAX_NET_ROC = 40.0
+MIN_CREDIT = 0.20
+MIN_EM_DISTANCE = 0.55       # short strike must be >= 0.55 expected moves away
+EARNINGS_BLOCK_DAYS = 14
+COMMISSION_PER_CONTRACT_LEG = 0.65  # estimate; 2 legs x open+close
+DEFAULT_MAX_RISK_PER_TRADE = 500.0
 
 
 def safe_float(x, default=np.nan):
@@ -38,15 +57,17 @@ def safe_float(x, default=np.nan):
         return default
 
 
-def normal_cdf(x: float) -> float:
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def normal_cdf(x):
     return 0.5 * (1 + erf(x / sqrt(2)))
 
 
-def download_history(ticker: str, period: str = "1y") -> pd.DataFrame:
-    """Ticker-by-ticker only. Avoids yfinance multi-ticker contamination."""
+def download_history(ticker, period="1y"):
     try:
-        tk = yf.Ticker(ticker)
-        df = tk.history(period=period, interval="1d", auto_adjust=True)
+        df = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
         if df is None or df.empty:
             return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
@@ -55,43 +76,39 @@ def download_history(ticker: str, period: str = "1y") -> pd.DataFrame:
         needed = ["Open", "High", "Low", "Close"]
         if not all(c in df.columns for c in needed):
             return pd.DataFrame()
-        df = df.dropna(subset=needed)
-        return df
+        return df.dropna(subset=needed)
     except Exception:
         return pd.DataFrame()
 
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
 
-def calculate_iv_rank_proxy(hist: pd.DataFrame) -> float:
+def calculate_iv_rank_proxy(hist):
+    """HV-rank proxy. Keep name visible as HVR/IVR proxy; it is NOT true option IV Rank."""
     try:
-        returns = hist["Close"].pct_change().dropna()
-        hv20 = returns.rolling(20).std() * np.sqrt(252) * 100
-        hv20 = hv20.dropna()
+        ret = hist["Close"].pct_change().dropna()
+        hv20 = (ret.rolling(20).std() * np.sqrt(252) * 100).dropna()
         if len(hv20) < 30:
             return np.nan
-        cur = safe_float(hv20.iloc[-1])
-        mn = safe_float(hv20.min())
-        mx = safe_float(hv20.max())
-        if np.isnan(cur) or np.isnan(mn) or np.isnan(mx) or mx <= mn:
+        cur, mn, mx = map(safe_float, [hv20.iloc[-1], hv20.min(), hv20.max()])
+        if any(np.isnan(x) for x in [cur, mn, mx]) or mx <= mn:
             return np.nan
-        return round(max(0, min(100, (cur - mn) / (mx - mn) * 100)), 1)
+        return round(clamp((cur-mn)/(mx-mn)*100, 0, 100), 1)
     except Exception:
         return np.nan
 
 
-def get_next_earnings(ticker: str) -> tuple[str, Optional[int]]:
+def get_next_earnings(ticker):
     try:
-        tk = yf.Ticker(ticker)
-        cal = getattr(tk, "calendar", None)
+        cal = getattr(yf.Ticker(ticker), "calendar", None)
         raw = None
         if isinstance(cal, dict):
             raw = cal.get("Earnings Date") or cal.get("EarningsDate")
@@ -114,17 +131,14 @@ def get_next_earnings(ticker: str) -> tuple[str, Optional[int]]:
         return "No disponible", None
 
 
-def choose_expiration(tk: yf.Ticker) -> tuple[Optional[str], Optional[int]]:
+def choose_expiration(tk):
     try:
-        expirations = list(tk.options)
-        if not expirations:
-            return None, None
         today = pd.Timestamp.today().normalize()
         candidates = []
-        for exp in expirations:
+        for exp in list(tk.options):
             dte = int((pd.Timestamp(exp) - today).days)
             if MIN_DTE <= dte <= MAX_DTE:
-                candidates.append((exp, dte, abs(dte - TARGET_DTE)))
+                candidates.append((exp, dte, abs(dte-TARGET_DTE)))
         if not candidates:
             return None, None
         candidates.sort(key=lambda x: x[2])
@@ -133,33 +147,114 @@ def choose_expiration(tk: yf.Ticker) -> tuple[Optional[str], Optional[int]]:
         return None, None
 
 
-def estimate_delta_prob(price: float, strike: float, iv_pct: float, dte: int, side: str) -> tuple[float, float]:
+def estimate_delta_prob(price, strike, iv_pct, dte, side):
+    """BS-style estimate because yfinance does not provide reliable live Greeks."""
     try:
-        if price <= 0 or strike <= 0 or iv_pct <= 0 or dte <= 0:
+        if min(price, strike, iv_pct, dte) <= 0:
             return np.nan, np.nan
-        t = dte / 365
-        sigma = iv_pct / 100
-        d1 = (log(price / strike) + (RISK_FREE_RATE + 0.5 * sigma ** 2) * t) / (sigma * sqrt(t))
-        d2 = d1 - sigma * sqrt(t)
+        t = dte/365
+        sigma = iv_pct/100
+        d1 = (log(price/strike) + (RISK_FREE_RATE + 0.5*sigma**2)*t)/(sigma*sqrt(t))
+        d2 = d1 - sigma*sqrt(t)
         if side == "PUT":
-            delta = normal_cdf(d1) - 1
-            prob_otm = normal_cdf(d2) * 100
+            delta = normal_cdf(d1)-1
+            prob_otm = normal_cdf(d2)*100
         else:
             delta = normal_cdf(d1)
-            prob_otm = normal_cdf(-d2) * 100
-        return round(delta, 2), round(prob_otm, 1)
+            prob_otm = normal_cdf(-d2)*100
+        return round(delta, 3), round(prob_otm, 1)
     except Exception:
         return np.nan, np.nan
 
 
-def clean_chain(df: pd.DataFrame) -> pd.DataFrame:
+def clean_chain(df):
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
-    for col in ["strike", "bid", "ask", "impliedVolatility", "openInterest", "volume"]:
+    for col in ["strike","bid","ask","impliedVolatility","openInterest","volume"]:
         out[col] = pd.to_numeric(out.get(col, np.nan), errors="coerce")
-    out = out.dropna(subset=["strike", "bid", "ask", "impliedVolatility"])
-    return out
+    return out.dropna(subset=["strike","bid","ask","impliedVolatility"])
+
+
+def technical_context(hist, side):
+    close = hist["Close"]
+    price = safe_float(close.iloc[-1])
+    rv = safe_float(rsi(close).iloc[-1])
+    sma20 = safe_float(close.rolling(20).mean().iloc[-1])
+    sma50 = safe_float(close.rolling(50).mean().iloc[-1])
+    sma200 = safe_float(close.rolling(200).mean().iloc[-1])
+    mom20 = safe_float((price/close.iloc[-21]-1)*100) if len(close) >= 21 else np.nan
+    support = safe_float(hist["Low"].tail(60).min())
+    resistance = safe_float(hist["High"].tail(60).max())
+    ds = ((price-support)/support*100) if support > 0 else np.nan
+    dr = ((resistance-price)/price*100) if price > 0 else np.nan
+
+    # diagnostic score only
+    score = 50
+    if side == "PUT":
+        if rv <= 35: score += 12
+        elif rv <= 42: score += 7
+        if not np.isnan(sma200): score += 8 if price > sma200 else -10
+        if not np.isnan(sma20) and not np.isnan(sma50): score += 6 if sma20 >= sma50 else -5
+        if not np.isnan(ds): score += 8 if ds <= 3 else (4 if ds <= 6 else 0)
+    else:
+        if rv >= 70: score += 12
+        elif rv >= 62: score += 7
+        if not np.isnan(sma20) and not np.isnan(sma50): score += 6 if sma20 <= sma50 else 0
+        if not np.isnan(dr): score += 8 if dr <= 4 else (4 if dr <= 8 else 0)
+
+    return dict(price=round(price,2), rsi=round(rv,1), sma20=sma20, sma50=sma50,
+                sma200=sma200, momentum20=mom20, dist_support=ds,
+                dist_resistance=dr, technical_score=int(clamp(round(score),0,100)))
+
+
+def detect_signal(hist):
+    close = hist["Close"]
+    price = safe_float(close.iloc[-1])
+    rv = safe_float(rsi(close).iloc[-1])
+    support = safe_float(hist["Low"].tail(60).min())
+    resistance = safe_float(hist["High"].tail(60).max())
+    ds = ((price-support)/support*100) if support > 0 else np.nan
+    dr = ((resistance-price)/price*100) if price > 0 else np.nan
+    if rv <= 42 and ds <= 6:
+        return "PUT"
+    if rv >= 62 and dr <= 8:
+        return "CALL"
+    return "NO TRADE"
+
+
+def estimate_win_probability(prob_otm, side, tech, iv_rank, em_distance):
+    """
+    Estimated win probability.
+    Base = option-implied Prob OTM.
+    Adjustments are deliberately small/capped until Nov calibration.
+    """
+    p = float(prob_otm)
+    adj = 0.0
+    rv = tech["rsi"]
+    sma20, sma50, sma200 = tech["sma20"], tech["sma50"], tech["sma200"]
+    price = tech["price"]
+
+    if side == "PUT":
+        if 30 <= rv <= 42: adj += 1.5
+        if not np.isnan(sma200) and price > sma200: adj += 1.0
+        if not np.isnan(sma20) and not np.isnan(sma50) and sma20 >= sma50: adj += 0.5
+        if tech["dist_support"] is not None and not np.isnan(tech["dist_support"]) and tech["dist_support"] <= 3: adj += 1.0
+    else:
+        if 62 <= rv <= 78: adj += 1.0
+        if not np.isnan(sma20) and not np.isnan(sma50) and sma20 <= sma50: adj += 1.0
+        if tech["dist_resistance"] is not None and not np.isnan(tech["dist_resistance"]) and tech["dist_resistance"] <= 4: adj += 1.0
+
+    if not np.isnan(iv_rank):
+        if iv_rank >= 60: adj += 0.5
+        elif iv_rank < 15: adj -= 1.0
+
+    if em_distance >= 1.0: adj += 1.5
+    elif em_distance < 0.70: adj -= 1.5
+
+    # Never allow technical heuristics to move probability more than +/-5 points.
+    adj = clamp(adj, -5.0, 5.0)
+    return round(clamp(p + adj, 55.0, 90.0), 1)
 
 
 @dataclass
@@ -171,8 +266,8 @@ class SetupResult:
     rsi: float
     signal: str
     technical_score: int
-    options_score: Optional[int]
-    final_score: int
+    options_quality_score: Optional[int]
+    win_probability: Optional[float]
     contracts: int
     spread: str
     short_strike: Optional[float]
@@ -183,210 +278,202 @@ class SetupResult:
     earnings_days: Optional[int]
     earnings_status: str
     credit: Optional[float]
+    commission_rt: Optional[float]
     max_loss: Optional[float]
+    net_max_loss: Optional[float]
     roc: Optional[float]
+    net_roc: Optional[float]
     prob_otm: Optional[float]
     delta: Optional[float]
+    delta_source: str
     iv_rank: Optional[float]
+    short_iv: Optional[float]
+    expected_move: Optional[float]
+    em_distance: Optional[float]
     liquidity: str
     oi: Optional[float]
     bid_ask_spread_pct: Optional[float]
     reject_reason: str
     executable: bool
 
+    @property
+    def final_score(self):
+        # backward compatibility with old alerts/app code
+        return int(round(self.win_probability or 0))
+
+    @property
+    def options_score(self):
+        return self.options_quality_score
+
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d["final_score"] = self.final_score
+        d["options_score"] = self.options_score
+        return d
 
 
-def technical_signal_and_score(hist: pd.DataFrame) -> dict:
-    close = hist["Close"]
-    price = safe_float(close.iloc[-1])
-    r = safe_float(rsi(close).iloc[-1])
-    sma20 = safe_float(close.rolling(20).mean().iloc[-1])
-    sma50 = safe_float(close.rolling(50).mean().iloc[-1])
-    sma200 = safe_float(close.rolling(200).mean().iloc[-1])
-    support = safe_float(hist["Low"].tail(60).min())
-    resistance = safe_float(hist["High"].tail(60).max())
-    dist_support = ((price - support) / support * 100) if support > 0 else np.nan
-    dist_res = ((resistance - price) / price * 100) if price > 0 else np.nan
-
-    signal = "NO TRADE"
-    score = 0
-
-    # Bull Put Spread candidate: oversold / pullback near support, not broken trend.
-    put_candidate = (r <= 42 and dist_support <= 6.0)
-    # Bear Call Spread candidate: overbought / near resistance.
-    call_candidate = (r >= 62 and dist_res <= 8.0)
-
-    if put_candidate:
-        signal = "PUT"
-        score = 50
-        if r <= 35: score += 12
-        elif r <= 42: score += 7
-        if not np.isnan(sma200): score += 10 if price > sma200 else -10
-        if not np.isnan(sma20) and not np.isnan(sma50): score += 8 if sma20 >= sma50 else -5
-        if dist_support <= 3: score += 10
-        elif dist_support <= 6: score += 5
-    elif call_candidate:
-        signal = "CALL"
-        score = 50
-        if r >= 70: score += 12
-        elif r >= 62: score += 7
-        if not np.isnan(sma200): score += 8 if price < sma200 else 0
-        if not np.isnan(sma20) and not np.isnan(sma50): score += 8 if sma20 <= sma50 else 0
-        if dist_res <= 4: score += 10
-        elif dist_res <= 8: score += 5
-    else:
-        score = 0
-
-    return {
-        "price": round(price, 2), "rsi": round(r, 1), "signal": signal,
-        "technical_score": int(max(0, min(100, round(score))))
-    }
-
-
-def build_best_spread(ticker: str, price: float, side: str, iv_rank: float) -> dict:
+def build_best_spread(ticker, price, side, iv_rank, tech, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
     tk = yf.Ticker(ticker)
     exp, dte = choose_expiration(tk)
     if not exp:
-        return {"ok": False, "reason": "Sin expiración válida 25-50 DTE"}
+        return {"ok":False, "reason":"Sin expiración válida 25-50 DTE"}
     try:
         chain = tk.option_chain(exp)
     except Exception:
-        return {"ok": False, "reason": "No se pudo descargar option chain"}
+        return {"ok":False, "reason":"No se pudo descargar option chain"}
 
-    df = clean_chain(chain.puts if side == "PUT" else chain.calls)
+    df = clean_chain(chain.puts if side=="PUT" else chain.calls)
     if df.empty:
-        return {"ok": False, "reason": "Cadena de opciones vacía"}
+        return {"ok":False, "reason":"Cadena de opciones vacía"}
 
     candidates = []
     for width in SPREAD_WIDTHS:
         for _, short in df.iterrows():
             ss = safe_float(short["strike"])
-            if side == "PUT" and ss >= price:
-                continue
-            if side == "CALL" and ss <= price:
-                continue
-            long_target = ss - width if side == "PUT" else ss + width
-            long_df = df.iloc[(df["strike"] - long_target).abs().argsort()[:1]]
-            if long_df.empty:
-                continue
+            if side=="PUT" and ss >= price: continue
+            if side=="CALL" and ss <= price: continue
+
+            target = ss-width if side=="PUT" else ss+width
+            long_df = df.iloc[(df["strike"]-target).abs().argsort()[:1]]
+            if long_df.empty: continue
             long = long_df.iloc[0]
             ls = safe_float(long["strike"])
-            actual_width = abs(ss - ls)
-            if actual_width <= 0:
-                continue
-            short_bid = safe_float(short["bid"])
-            short_ask = safe_float(short["ask"])
-            long_ask = safe_float(long["ask"])
+            actual_width = abs(ss-ls)
+            if actual_width <= 0: continue
+
+            sbid, sask = safe_float(short["bid"]), safe_float(short["ask"])
+            lask = safe_float(long["ask"])
             oi = safe_float(short.get("openInterest", np.nan))
-            vol = safe_float(short.get("volume", np.nan))
-            iv = safe_float(short.get("impliedVolatility", np.nan)) * 100
-            if short_bid <= 0 or short_ask <= 0 or long_ask < 0 or iv <= 0:
-                continue
-            credit = round(short_bid - long_ask, 2)
-            if credit <= 0:
-                continue
-            mid = (short_bid + short_ask) / 2
-            ba_pct = round((short_ask - short_bid) / mid * 100, 1) if mid > 0 else np.nan
-            max_loss = round((actual_width - credit) * CONTRACT_MULTIPLIER, 2)
-            roc = round((credit * CONTRACT_MULTIPLIER / max_loss) * 100, 1) if max_loss > 0 else np.nan
-            delta, prob_otm = estimate_delta_prob(price, ss, iv, dte, side)
+            iv = safe_float(short.get("impliedVolatility", np.nan))*100
 
-            # Strict executable filters. No fake/fallback values.
-            if np.isnan(delta) or np.isnan(prob_otm) or np.isnan(roc) or np.isnan(ba_pct):
-                continue
-            if prob_otm >= 99.5 or abs(delta) < 0.03:  # usually fake or useless.
-                continue
-            if prob_otm < 65 or prob_otm > 92:
-                continue
-            if abs(delta) > 0.35:
-                continue
-            if roc < 6 or roc > 40:
-                continue
-            if oi < 100:
-                continue
-            if ba_pct > 30:
-                continue
+            if any(np.isnan(x) for x in [sbid,sask,lask,oi,iv]): continue
+            if sbid <= 0 or sask <= 0 or lask < 0 or iv <= 0: continue
 
-            liquidity = "Alta" if oi >= 300 and ba_pct <= 15 else "Media"
-            score = 50
-            if 70 <= prob_otm <= 85: score += 15
-            elif prob_otm > 85: score += 8
-            if 8 <= roc <= 20: score += 15
-            elif roc > 20: score += 8
-            if 0.10 <= abs(delta) <= 0.28: score += 10
-            if liquidity == "Alta": score += 8
-            if not np.isnan(iv_rank):
-                if iv_rank >= 60: score += 8
-                elif iv_rank < 20: score -= 10
+            credit = round(sbid-lask, 2)  # conservative executable estimate
+            if credit < MIN_CREDIT: continue
 
-            candidates.append({
-                "short": ss, "long": ls, "width": actual_width, "credit": credit,
-                "max_loss": max_loss, "roc": roc, "delta": delta, "prob_otm": prob_otm,
-                "oi": oi, "volume": vol, "ba_pct": ba_pct, "iv": round(iv, 1),
-                "expiration": exp, "dte": dte, "liquidity": liquidity,
-                "options_score": int(max(0, min(100, round(score))))
-            })
+            mid = (sbid+sask)/2
+            ba = round((sask-sbid)/mid*100,1) if mid>0 else np.nan
+            delta, prob = estimate_delta_prob(price, ss, iv, dte, side)
+
+            gross_max_loss = round((actual_width-credit)*100,2)
+            commission_rt = round(COMMISSION_PER_CONTRACT_LEG*4,2)
+            net_max_loss = round(gross_max_loss+commission_rt,2)
+            gross_profit = credit*100
+            net_profit = gross_profit-commission_rt
+            roc = round(gross_profit/gross_max_loss*100,1) if gross_max_loss>0 else np.nan
+            net_roc = round(net_profit/net_max_loss*100,1) if net_max_loss>0 else np.nan
+
+            expected_move = round(price*(iv/100)*sqrt(dte/365),2)
+            strike_distance = (price-ss) if side=="PUT" else (ss-price)
+            em_distance = round(strike_distance/expected_move,2) if expected_move>0 else np.nan
+
+            # HARD DATA + EXECUTION FILTERS
+            if any(np.isnan(x) for x in [delta,prob,ba,roc,net_roc,expected_move,em_distance]): continue
+            if prob >= 99.5 or abs(delta) < 0.03: continue
+            if not (MIN_PROB_OTM <= prob <= MAX_PROB_OTM): continue
+            if not (MIN_SHORT_DELTA <= abs(delta) <= MAX_SHORT_DELTA): continue
+            if oi < MIN_OI: continue
+            if ba > MAX_BID_ASK_PCT: continue
+            if not (MIN_NET_ROC <= net_roc <= MAX_NET_ROC): continue
+            if em_distance < MIN_EM_DISTANCE: continue
+            if net_max_loss > max_risk: continue
+
+            liquidity = "Alta" if oi>=300 and ba<=15 else "Media"
+            quality = 50
+            if 70<=prob<=85: quality += 15
+            if 8<=net_roc<=20: quality += 15
+            if 0.10<=abs(delta)<=0.25: quality += 10
+            if liquidity=="Alta": quality += 8
+            if em_distance>=1.0: quality += 7
+            if not np.isnan(iv_rank) and iv_rank>=50: quality += 5
+            quality = int(clamp(round(quality),0,100))
+
+            winp = estimate_win_probability(prob, side, tech, iv_rank, em_distance)
+
+            candidates.append(dict(
+                short=ss,long=ls,credit=credit,commission_rt=commission_rt,
+                max_loss=gross_max_loss,net_max_loss=net_max_loss,roc=roc,net_roc=net_roc,
+                delta=delta,prob_otm=prob,oi=oi,ba_pct=ba,iv=round(iv,1),
+                expected_move=expected_move,em_distance=em_distance,
+                expiration=exp,dte=dte,liquidity=liquidity,
+                options_quality_score=quality,win_probability=winp
+            ))
 
     if not candidates:
-        return {"ok": False, "reason": "Sin spread ejecutable: filtros de crédito/ROC/prob/OI/bid-ask"}
+        return {"ok":False, "reason":"Sin spread ejecutable: filtros de datos/delta/crédito/ROC/OI/bid-ask/EM/riesgo"}
 
-    candidates.sort(key=lambda c: (c["options_score"], c["roc"], c["oi"]), reverse=True)
+    candidates.sort(key=lambda c:(c["win_probability"],c["options_quality_score"],c["net_roc"],c["oi"]), reverse=True)
     best = candidates[0]
     best["ok"] = True
     return best
 
 
-def contracts_for_score(score: int) -> int:
-    if score >= 75:
+def contracts_for_trade(win_probability, net_max_loss, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
+    if not win_probability or not net_max_loss or net_max_loss <= 0:
+        return 0
+    by_risk = int(max_risk // net_max_loss)
+    if by_risk <= 0: return 0
+    # Conservative during forward-test
+    if win_probability >= 80 and by_risk >= 2:
         return 2
-    if score >= 60:
-        return 1
-    return 0
+    return 1
 
 
-def analyze_ticker(ticker: str, min_score: int = 60) -> SetupResult:
+def empty_result(ticker, reason, price=np.nan, rv=np.nan, signal="NO TRADE",
+                 tech_score=0, iv_rank=np.nan, earnings_date="No disponible",
+                 earnings_days=None, earnings_status="UNKNOWN", status="ERROR"):
+    return SetupResult(ticker,CORE_VERSION,status,price,rv,signal,tech_score,None,None,0,"",
+                       None,None,"",None,earnings_date,earnings_days,earnings_status,
+                       None,None,None,None,None,None,None,None,None,"N/A",iv_rank,None,None,None,
+                       "No disponible",None,None,reason,False)
+
+
+def analyze_ticker(ticker, min_score=60, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
+    """
+    min_score is retained for compatibility, but now means MINIMUM ESTIMATED WIN PROBABILITY.
+    """
     ticker = ticker.strip().upper()
     hist = download_history(ticker)
-    if hist.empty or len(hist) < 80:
-        return SetupResult(ticker, CORE_VERSION, "ERROR", np.nan, np.nan, "NO TRADE", 0, None, 0, 0, "", None, None, "", None, "No disponible", None, "UNKNOWN", None, None, None, None, None, None, "No disponible", None, None, "Sin datos históricos suficientes", False)
+    if hist.empty or len(hist)<80:
+        return empty_result(ticker,"Sin datos históricos suficientes")
 
-    tech = technical_signal_and_score(hist)
-    price = tech["price"]
-    rsiv = tech["rsi"]
-    signal = tech["signal"]
-    technical_score = tech["technical_score"]
+    signal = detect_signal(hist)
+    if signal=="NO TRADE":
+        price = round(safe_float(hist["Close"].iloc[-1]),2)
+        rv = round(safe_float(rsi(hist["Close"]).iloc[-1]),1)
+        return empty_result(ticker,"Sin setup técnico",price,rv,status="OK")
+
+    tech = technical_context(hist,signal)
+    price, rv, tech_score = tech["price"],tech["rsi"],tech["technical_score"]
     iv_rank = calculate_iv_rank_proxy(hist)
-    earnings_date, earnings_days = get_next_earnings(ticker)
-    earnings_status = "OK"
-    if earnings_days is not None and 0 <= earnings_days <= 14:
-        earnings_status = "BLOQUEADO"
+    edate, edays = get_next_earnings(ticker)
+    estatus = "BLOQUEADO" if edays is not None and 0<=edays<=EARNINGS_BLOCK_DAYS else "OK"
 
-    if signal == "NO TRADE" or technical_score <= 0:
-        return SetupResult(ticker, CORE_VERSION, "OK", price, rsiv, "NO TRADE", technical_score, None, 0, 0, "", None, None, "", None, earnings_date, earnings_days, earnings_status, None, None, None, None, None, iv_rank, "No disponible", None, None, "Sin setup técnico", False)
-    if earnings_status == "BLOQUEADO":
-        return SetupResult(ticker, CORE_VERSION, "OK", price, rsiv, signal, technical_score, None, 0, 0, "", None, None, "", None, earnings_date, earnings_days, earnings_status, None, None, None, None, None, iv_rank, "No disponible", None, None, "Earnings demasiado cerca", False)
+    if estatus=="BLOQUEADO":
+        return empty_result(ticker,"Earnings demasiado cerca",price,rv,signal,tech_score,iv_rank,edate,edays,estatus,status="OK")
 
-    opt = build_best_spread(ticker, price, signal, iv_rank)
+    opt = build_best_spread(ticker,price,signal,iv_rank,tech,max_risk=max_risk)
     if not opt.get("ok"):
-        # Do not create executable alert if options are invalid. Keep technical score visible only.
-        return SetupResult(ticker, CORE_VERSION, "OK_NO_EXECUTABLE_OPTIONS", price, rsiv, signal, technical_score, None, technical_score, 0, "", None, None, "", None, earnings_date, earnings_days, earnings_status, None, None, None, None, None, iv_rank, "No ejecutable", None, None, opt.get("reason", "Opciones no válidas"), False)
+        return empty_result(ticker,opt.get("reason","Opciones no válidas"),price,rv,signal,tech_score,iv_rank,edate,edays,estatus,status="OK_NO_EXECUTABLE_OPTIONS")
 
-    options_score = int(opt["options_score"])
-    final = int(round(technical_score * 0.45 + options_score * 0.55))
-    contracts = contracts_for_score(final)
-    spread = f"{opt['short']:g}/{opt['long']:g} {'PCS' if signal == 'PUT' else 'CCS'}"
-    executable = final >= min_score and contracts > 0
-    reject = "" if executable else f"Score final menor que {min_score}"
+    winp = float(opt["win_probability"])
+    contracts = contracts_for_trade(winp,opt["net_max_loss"],max_risk=max_risk)
+    spread = f"{opt['short']:g}/{opt['long']:g} {'PCS' if signal=='PUT' else 'CCS'}"
+    executable = winp >= float(min_score) and contracts>0
+    reject = "" if executable else f"Probabilidad estimada menor que {min_score}%"
 
     return SetupResult(
-        ticker=ticker, core_version=CORE_VERSION, data_status="OK_EXECUTABLE_OPTIONS",
-        price=price, rsi=rsiv, signal=signal, technical_score=technical_score,
-        options_score=options_score, final_score=final, contracts=contracts,
-        spread=spread, short_strike=opt["short"], long_strike=opt["long"], expiration=opt["expiration"], dte=opt["dte"],
-        earnings_date=earnings_date, earnings_days=earnings_days, earnings_status=earnings_status,
-        credit=opt["credit"], max_loss=opt["max_loss"], roc=opt["roc"], prob_otm=opt["prob_otm"], delta=opt["delta"],
-        iv_rank=iv_rank, liquidity=opt["liquidity"], oi=opt["oi"], bid_ask_spread_pct=opt["ba_pct"],
-        reject_reason=reject, executable=executable
+        ticker=ticker,core_version=CORE_VERSION,data_status="OK_EXECUTABLE_OPTIONS",
+        price=price,rsi=rv,signal=signal,technical_score=tech_score,
+        options_quality_score=opt["options_quality_score"],win_probability=winp,
+        contracts=contracts,spread=spread,short_strike=opt["short"],long_strike=opt["long"],
+        expiration=opt["expiration"],dte=opt["dte"],earnings_date=edate,earnings_days=edays,
+        earnings_status=estatus,credit=opt["credit"],commission_rt=opt["commission_rt"],
+        max_loss=opt["max_loss"],net_max_loss=opt["net_max_loss"],roc=opt["roc"],net_roc=opt["net_roc"],
+        prob_otm=opt["prob_otm"],delta=opt["delta"],
+        delta_source="BS estimate from yfinance IV (not broker Greek)",
+        iv_rank=iv_rank,short_iv=opt["iv"],expected_move=opt["expected_move"],
+        em_distance=opt["em_distance"],liquidity=opt["liquidity"],oi=opt["oi"],
+        bid_ask_spread_pct=opt["ba_pct"],reject_reason=reject,executable=executable
     )
