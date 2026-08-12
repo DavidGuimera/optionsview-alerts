@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-CORE_VERSION = "2026.08.12-algo-v1.3-100"
+CORE_VERSION = "2026.08.12-algo-v1.3.1-100"
 
 DEFAULT_TICKERS = "MCD,PEP,PG,KO,JNJ,WMT,COST,HD,LOW,TGT,SBUX,MDLZ,CMCSA,MSFT,AAPL,GOOGL,META,AMZN,NVDA,AVGO,ADBE,CRM,ORCL,CSCO,AMD,INTC,MU,QCOM,TXN,AMAT,JPM,MA,V,BLK,SCHW,BAC,WFC,C,GS,MS,XOM,CVX,COP,SLB,OXY,UNH,ABBV,MRK,PFE,LLY,GILD,AMGN,CVS,CAT,DE,GE,HON,UPS,BA,RTX,LMT,DIS,NFLX,TSLA,NKE,BKNG,ABNB,GM,F,NEE,DUK,SO,LIN,FCX,NEM,PLD,AMT,SPY,QQQ,IWM,DIA,XLP,XLV,XLF,XLE,XLI,XLK,XLY,XLU,SMH,SOXX,TLT,GLD,SLV,USO,EEM,FXI,ARKK,IBM,PYPL"
 
@@ -426,10 +426,48 @@ def contracts_for_trade(win_probability, net_max_loss, max_risk=DEFAULT_MAX_RISK
 def empty_result(ticker, reason, price=np.nan, rv=np.nan, signal="NO TRADE",
                  tech_score=0, iv_rank=np.nan, earnings_date="No disponible",
                  earnings_days=None, earnings_status="UNKNOWN", status="ERROR"):
-    return SetupResult(ticker,CORE_VERSION,status,price,rv,signal,tech_score,None,None,None,None,0,"",
-                       None,None,"",None,earnings_date,earnings_days,earnings_status,
-                       None,None,None,None,None,None,None,None,None,"N/A",iv_rank,None,None,None,
-                       "No disponible",None,None,reason,False)
+    # Use keyword arguments deliberately.
+    # This prevents positional-argument mismatches when SetupResult gains new fields.
+    return SetupResult(
+        ticker=ticker,
+        core_version=CORE_VERSION,
+        data_status=status,
+        price=price,
+        rsi=rv,
+        signal=signal,
+        technical_score=tech_score,
+        options_quality_score=None,
+        win_probability=None,
+        probability_adjustment=None,
+        min_entry_credit=None,
+        contracts=0,
+        spread="",
+        short_strike=None,
+        long_strike=None,
+        expiration="",
+        dte=None,
+        earnings_date=earnings_date,
+        earnings_days=earnings_days,
+        earnings_status=earnings_status,
+        credit=None,
+        commission_rt=None,
+        max_loss=None,
+        net_max_loss=None,
+        roc=None,
+        net_roc=None,
+        prob_otm=None,
+        delta=None,
+        delta_source="N/A",
+        iv_rank=iv_rank,
+        short_iv=None,
+        expected_move=None,
+        em_distance=None,
+        liquidity="No disponible",
+        oi=None,
+        bid_ask_spread_pct=None,
+        reject_reason=reason,
+        executable=False,
+    )
 
 
 def analyze_ticker(ticker, min_score=60, max_risk=DEFAULT_MAX_RISK_PER_TRADE):
