@@ -2,17 +2,22 @@ name: OptionsView Alerts ALGO v1.1
 
 on:
   workflow_dispatch:
+
   schedule:
-    # GitHub cron is UTC. Keep/adjust these times to your preferred market schedule.
     - cron: "15 15 * * 1-5"
     - cron: "15 18 * * 1-5"
 
+permissions:
+  contents: write
+
 jobs:
   scan-alerts:
+
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -30,11 +35,30 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           MIN_WIN_PROB: "68"
           MAX_ALERTS: "6"
           MAX_RISK_PER_TRADE: "500"
           MAX_PER_BUCKET: "2"
+
         run: python alerts_engine.py
+
+      - name: Append scan to permanent history
+        run: python update_history.py
+
+      - name: Commit permanent history
+        run: |
+          git config user.name "optionsview-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/optionsview_history.csv
+
+          if git diff --cached --quiet; then
+            echo "No history changes to commit."
+          else
+            git commit -m "data: append OptionsView scan [skip ci]"
+            git push
+          fi
 
       - name: Upload scan log
         if: always()
