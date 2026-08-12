@@ -18,6 +18,9 @@ MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", "500"))
 # Prevent a Telegram burst of highly correlated trades.
 MAX_PER_BUCKET = int(os.getenv("MAX_PER_BUCKET", "2"))
 
+# Telegram hard limit is 4096 chars. Stay below it for safety.
+TELEGRAM_SAFE_LIMIT = 3800
+
 BUCKETS = {
     "MEGA_TECH": {"MSFT","AAPL","GOOGL","META","AMZN","NVDA","AVGO","ADBE","CRM","QQQ"},
     "CONSUMER": {"MCD","PEP","PG","KO","WMT","COST","HD","LOW","TGT","SBUX","MDLZ"},
@@ -44,15 +47,112 @@ def signal_id(r):
     return f"{r.ticker}-{date}-{s1}{side}{s2}{side}"
 
 
+def split_telegram_message(text, limit=TELEGRAM_SAFE_LIMIT):
+    """
+    Split long Telegram messages on blank-line boundaries when possible.
+    Never sends a chunk above the configured safe limit.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    if len(text) <= limit:
+        return [text]
+
+    blocks = text.split("\n\n")
+    chunks = []
+    current = ""
+
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        candidate = block if not current else current + "\n\n" + block
+
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+        # Fallback: one single block is itself too long.
+        while len(block) > limit:
+            cut = block.rfind("\n", 0, limit)
+            if cut <= 0:
+                cut = limit
+            chunks.append(block[:cut].strip())
+            block = block[cut:].strip()
+
+        current = block
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def send_telegram(text):
+    """
+    Send reliably to Telegram.
+    - Splits messages safely below Telegram's length limit.
+    - Logs each part.
+    - Raises on failure so GitHub Action is not falsely green.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets missing. Message not sent:")
-        print(text)
-        return
+        raise RuntimeError(
+            "Telegram secrets missing: TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID"
+        )
+
+    chunks = split_telegram_message(text)
+    if not chunks:
+        raise RuntimeError("Telegram message is empty")
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    r = requests.post(url, data={"chat_id":TELEGRAM_CHAT_ID,"text":text}, timeout=25)
-    if r.status_code >= 300:
-        print("Telegram error:",r.status_code,r.text)
+
+    for i, chunk in enumerate(chunks, start=1):
+        if len(chunks) > 1:
+            chunk = f"({i}/{len(chunks)})\n{chunk}"
+
+        print(
+            f"TELEGRAM SEND: part={i}/{len(chunks)} chars={len(chunk)}"
+        )
+
+        try:
+            r = requests.post(
+                url,
+                data={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": chunk,
+                    "disable_web_page_preview": True,
+                },
+                timeout=25,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"Telegram request failed: {e}") from e
+
+        if r.status_code >= 300:
+            raise RuntimeError(
+                f"Telegram HTTP {r.status_code}: {r.text}"
+            )
+
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+
+        if payload and not payload.get("ok", False):
+            raise RuntimeError(
+                f"Telegram API returned ok=false: {payload}"
+            )
+
+        print(f"TELEGRAM OK: part {i}/{len(chunks)} sent")
+
+        # Small pause avoids burst/rate issues.
+        if i < len(chunks):
+            time.sleep(0.7)
 
 
 def fmt(x,suffix=""):
@@ -86,6 +186,7 @@ def alert_message(results):
         f"🔥 OptionsView ALGO v1.3 · {now}",
         f"Core: {CORE_VERSION}",
         f"Universo: {len(TICKERS)} | Umbral prob. éxito: {MIN_WIN_PROB:g}%",
+        f"Setups enviados: {len(results)}",
         ""
     ]
     for r in results:
@@ -149,6 +250,7 @@ def write_csv(scan_rows):
         w.writeheader()
         for row in scan_rows:
             w.writerow({k: row.get(k, "") for k in fieldnames})
+
 
 def main():
     all_results = []
@@ -274,6 +376,11 @@ def main():
             x.technical_score or 0
         ),
         reverse=True
+    )
+
+    print(
+        f"TELEGRAM PREP: executable={len(executable)} "
+        f"selected={len(selected)} max_alerts={MAX_ALERTS}"
     )
 
     if selected:
