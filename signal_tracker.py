@@ -47,9 +47,12 @@ SIGNAL_FIELDS = [
     "entry_oi","entry_bid_ask_pct","entry_liquidity","entry_rsi",
     "entry_technical_score","entry_options_quality_score",
     "hold_status","hold_exit_utc","hold_exit_reason","hold_pnl_net",
+    "hold_result","hold_return_pct","hold_days_held",
     "tp50_status","tp50_exit_utc","tp50_exit_reason","tp50_exit_debit","tp50_pnl_net",
+    "tp50_result","tp50_return_pct","tp50_days_held",
     "tp50_stop2x_status","tp50_stop2x_exit_utc","tp50_stop2x_exit_reason",
     "tp50_stop2x_exit_debit","tp50_stop2x_pnl_net",
+    "tp50_stop2x_result","tp50_stop2x_return_pct","tp50_stop2x_days_held",
     "latest_mark_utc","latest_underlying_price","latest_close_debit",
     "latest_unrealized_pnl_net","latest_dte",
 ]
@@ -169,11 +172,14 @@ def create_signal(row: Dict[str, str], seen_utc: str) -> Dict[str, object]:
         "entry_technical_score": row.get("technical_score", ""),
         "entry_options_quality_score": row.get("options_quality_score", ""),
         "hold_status": "OPEN","hold_exit_utc": "","hold_exit_reason": "","hold_pnl_net": "",
+        "hold_result": "","hold_return_pct": "","hold_days_held": "",
         "tp50_status": "OPEN","tp50_exit_utc": "","tp50_exit_reason": "",
         "tp50_exit_debit": "","tp50_pnl_net": "",
+        "tp50_result": "","tp50_return_pct": "","tp50_days_held": "",
         "tp50_stop2x_status": "OPEN","tp50_stop2x_exit_utc": "",
         "tp50_stop2x_exit_reason": "","tp50_stop2x_exit_debit": "",
         "tp50_stop2x_pnl_net": "",
+        "tp50_stop2x_result": "","tp50_stop2x_return_pct": "","tp50_stop2x_days_held": "",
         "latest_mark_utc": "","latest_underlying_price": "","latest_close_debit": "",
         "latest_unrealized_pnl_net": "","latest_dte": "",
     }
@@ -287,15 +293,54 @@ def pnl_net(entry_credit: float, exit_debit: float, commission_rt: float) -> flo
     return round((entry_credit - exit_debit) * CONTRACT_MULTIPLIER - commission_rt, 2)
 
 
+def classify_result(pnl: float, tolerance: float = 0.01) -> str:
+    if pnl > tolerance:
+        return "WIN"
+    if pnl < -tolerance:
+        return "LOSS"
+    return "BREAKEVEN"
+
+
+def return_on_risk_pct(pnl: float, net_max_loss) -> object:
+    risk = safe_float(net_max_loss)
+    if risk is None or risk <= 0:
+        return ""
+    return round((pnl / risk) * 100, 2)
+
+
+def days_held(first_seen_utc: str, exit_utc: str) -> object:
+    try:
+        start = pd.to_datetime(first_seen_utc, utc=True, errors="coerce")
+        end = pd.to_datetime(exit_utc, utc=True, errors="coerce")
+        if pd.isna(start) or pd.isna(end):
+            return ""
+        return round((end - start).total_seconds() / 86400.0, 2)
+    except Exception:
+        return ""
+
+
 def close_strategy(signal: Dict[str, object], prefix: str, when: str, reason: str, debit: float):
     entry_credit = safe_float(signal.get("entry_credit"), 0.0)
     commission = safe_float(signal.get("commission_rt"), 0.0)
+    pnl = pnl_net(entry_credit, debit, commission)
+
     signal[f"{prefix}_status"] = "CLOSED"
     signal[f"{prefix}_exit_utc"] = when
     signal[f"{prefix}_exit_reason"] = reason
+
     if prefix != "hold":
         signal[f"{prefix}_exit_debit"] = round(debit, 4)
-    signal[f"{prefix}_pnl_net"] = pnl_net(entry_credit, debit, commission)
+
+    signal[f"{prefix}_pnl_net"] = pnl
+    signal[f"{prefix}_result"] = classify_result(pnl)
+    signal[f"{prefix}_return_pct"] = return_on_risk_pct(
+        pnl,
+        signal.get("net_max_loss")
+    )
+    signal[f"{prefix}_days_held"] = days_held(
+        str(signal.get("first_seen_utc", "")),
+        when
+    )
 
 
 def process_expiration(signal: Dict[str, object], now_utc: str) -> bool:
@@ -303,7 +348,10 @@ def process_expiration(signal: Dict[str, object], now_utc: str) -> bool:
     if not expiration:
         return False
 
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    scan_dt = pd.to_datetime(now_utc, utc=True, errors="coerce")
+    if pd.isna(scan_dt):
+        scan_dt = pd.Timestamp.now(tz="UTC")
+    today = scan_dt.tz_localize(None).normalize()
     exp = pd.Timestamp(expiration).normalize()
 
     if today < exp:
@@ -336,7 +384,10 @@ def mark_signal(signal: Dict[str, object], now_utc: str) -> Dict[str, object]:
     ticker = str(signal["ticker"])
     expiration = str(signal["expiration"])
     exp = pd.Timestamp(expiration).normalize()
-    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    scan_dt = pd.to_datetime(now_utc, utc=True, errors="coerce")
+    if pd.isna(scan_dt):
+        scan_dt = pd.Timestamp.now(tz="UTC")
+    today = scan_dt.tz_localize(None).normalize()
     dte = int((exp - today).days)
 
     underlying = current_underlying_price(ticker)
@@ -467,9 +518,15 @@ def main():
         )
     )
 
+    closed_hold = sum(1 for s in signals if s.get("hold_status") == "CLOSED")
+    closed_tp50 = sum(1 for s in signals if s.get("tp50_status") == "CLOSED")
+    closed_tpstop = sum(1 for s in signals if s.get("tp50_stop2x_status") == "CLOSED")
+
     print(
         f"TRACKER CHECK: new_signals={new_count} "
-        f"marked={marked_count} total_signals={len(signals)} open={open_signals}"
+        f"marked={marked_count} total_signals={len(signals)} open={open_signals} "
+        f"closed_hold={closed_hold} closed_tp50={closed_tp50} "
+        f"closed_tp50_stop2x={closed_tpstop}"
     )
 
 
