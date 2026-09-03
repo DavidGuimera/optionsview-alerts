@@ -2,12 +2,20 @@ name: OptionsView Alerts ALGO v1.3 · 100
 
 on:
   workflow_dispatch:
+
   schedule:
+    # 9:15 AM Gillette (MDT / UTC-6)
     - cron: "15 15 * * 1-5"
-    - cron: "15 18 * * 1-5"
+
+    # 11:30 AM Gillette (MDT / UTC-6)
+    - cron: "30 17 * * 1-5"
 
 permissions:
   contents: write
+
+concurrency:
+  group: optionsview-alerts
+  cancel-in-progress: false
 
 jobs:
   scan-alerts:
@@ -29,6 +37,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests
+
+      - name: Show execution time
+        run: |
+          echo "GitHub run started:"
+          date -u
+          TZ=America/Denver date
 
       - name: Run OptionsView scan
         env:
@@ -59,6 +73,7 @@ jobs:
             echo "No data changes to commit."
           else
             git commit -m "data: append OptionsView scan + tracker [skip ci]"
+            git pull --rebase
             git push
           fi
 
